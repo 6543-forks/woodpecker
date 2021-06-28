@@ -7,7 +7,7 @@ ifeq ($(VERSION),)
 	VERSION := $(shell echo ${DRONE_COMMIT_SHA} | head -c 8)
 endif
 
-LDFLAGS ?= -extldflags "-static"
+LDFLAGS ?=
 ifneq ($(VERSION),)
 	LDFLAGS := ${LDFLAGS} -X github.com/woodpecker-ci/woodpecker/version.Version=${VERSION}
 endif
@@ -74,10 +74,10 @@ build-frontend:
 build: build-agent build-server
 
 release-agent:
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags '${LDFLAGS}' -o release/drone-agent github.com/woodpecker-ci/woodpecker/cmd/drone-agent
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -tags sqlite3 -ldflags '${LDFLAGS}' -o release/drone-agent github.com/woodpecker-ci/woodpecker/cmd/drone-agent
 
 release-server:
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags '${LDFLAGS}' -o release/drone-server github.com/woodpecker-ci/woodpecker/cmd/drone-server
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -tags sqlite3 -ldflags '${LDFLAGS}' -o release/drone-server github.com/woodpecker-ci/woodpecker/cmd/drone-server
 
 release-cli:
 	# disable CGO for cross-compiling

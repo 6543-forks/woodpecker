@@ -1,4 +1,9 @@
-FROM alpine:3.9.4
+FROM alpine:3.13
+RUN apk add go make sqlite
+COPY . .
+RUN make release
+
+FROM alpine:3.13
 EXPOSE 8000 9000 80 443
 
 RUN apk add -U --no-cache ca-certificates
@@ -8,6 +13,7 @@ ENV DATABASE_CONFIG=/var/lib/drone/drone.sqlite
 ENV GODEBUG=netdns=go
 ENV XDG_CACHE_HOME /var/lib/drone
 
-ADD release/drone-server /bin/
+#ADD release/drone-server /bin/
+COPY --from=0 release/drone-server /bin/
 
 ENTRYPOINT ["/bin/drone-server"]
