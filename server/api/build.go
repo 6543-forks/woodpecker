@@ -358,6 +358,15 @@ func PostDecline(c *gin.Context) {
 	if build.Procs, err = _store.ProcList(build); err != nil {
 		log.Error().Err(err).Msg("can not get proc list from store")
 	}
+
+	for _, proc := range build.Procs {
+		if proc.State == model.StatusPending || proc.State == model.StatusSkipped {
+			if proc, err = shared.UpdateProcToStatusDeclined(_store, *proc); err != nil {
+				log.Error().Err(err).Msgf("can not update proc '%d' to status declined", proc.ID)
+			}
+		}
+	}
+
 	if build.Procs, err = model.Tree(build.Procs); err != nil {
 		log.Error().Err(err).Msg("can not build tree from proc list")
 	}
