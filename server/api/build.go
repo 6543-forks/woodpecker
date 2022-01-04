@@ -355,16 +355,24 @@ func PostDecline(c *gin.Context) {
 		return
 	}
 
-	if build.Procs, err = _store.ProcList(build); err != nil {
-		log.Error().Err(err).Msg("can not get proc list from store")
+	// fetch the build file from the database
+	configs, err := server.Config.Storage.Config.ConfigsForBuild(build.ID)
+	if err != nil {
+		log.Error().Msgf("failure to get build config for %s. %s", repo.FullName, err)
+		_ = c.AbortWithError(404, err)
+		return
+	}
+	var yamls []*remote.FileMeta
+	for _, y := range configs {
+		yamls = append(yamls, &remote.FileMeta{Data: y.Data, Name: y.Name})
 	}
 
-	for _, proc := range build.Procs {
-		if proc.State == model.StatusPending || proc.State == model.StatusSkipped {
-			if proc, err = shared.UpdateProcToStatusDeclined(_store, *proc); err != nil {
-				log.Error().Err(err).Msgf("can not update proc '%d' to status declined", proc.ID)
-			}
-		}
+	build, _, err = createBuildItems(c, _store, build, user, repo, yamls, nil)
+	if err != nil {
+		msg := fmt.Sprintf("failure to createBuildItems for %s", repo.FullName)
+		log.Error().Err(err).Msg(msg)
+		c.String(http.StatusInternalServerError, msg)
+		return
 	}
 
 	if build.Procs, err = model.Tree(build.Procs); err != nil {

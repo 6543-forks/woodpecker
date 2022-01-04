@@ -87,10 +87,3 @@ func UpdateProcToStatusKilled(store UpdateProcStore, proc model.Proc) (*model.Pr
 	proc.ExitCode = 137
 	return &proc, store.ProcUpdate(&proc)
 }
-
-func UpdateProcToStatusDeclined(store UpdateProcStore, proc model.Proc) (*model.Proc, error) {
-	proc.State = model.StatusDeclined
-	proc.Stopped = time.Now().Unix()
-	proc.Started = proc.Stopped
-	return &proc, store.ProcUpdate(&proc)
-}
