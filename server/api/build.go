@@ -350,7 +350,7 @@ func PostDecline(c *gin.Context) {
 		return
 	}
 
-	if _, err = shared.UpdateToStatusDeclined(_store, *build, user.Login); err != nil {
+	if build, err = shared.UpdateToStatusDeclined(_store, *build, user.Login); err != nil {
 		c.String(500, "error updating build. %s", err)
 		return
 	}
