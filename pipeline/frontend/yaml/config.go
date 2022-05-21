@@ -10,7 +10,6 @@ import (
 type (
 	// Config defines a pipeline configuration.
 	Config struct {
-		Cache     types.Stringorslice
 		Platform  string
 		Branches  constraint.List
 		Workspace Workspace

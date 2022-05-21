@@ -62,7 +62,6 @@ type Compiler struct {
 	metadata          frontend.Metadata
 	registries        []Registry
 	secrets           map[string]Secret
-	cacher            Cacher
 	reslimit          ResourceLimit
 	defaultCloneImage string
 }
@@ -163,8 +162,6 @@ func (c *Compiler) Compile(conf *yaml.Config) *backend.Config {
 		}
 	}
 
-	c.setupCache(conf, config)
-
 	// add services steps
 	if len(conf.Services.Containers) != 0 {
 		stage := new(backend.Stage)
@@ -210,41 +207,5 @@ func (c *Compiler) Compile(conf *yaml.Config) *backend.Config {
 		stage.Steps = append(stage.Steps, step)
 	}
 
-	c.setupCacheRebuild(conf, config)
-
 	return config
-}
-
-func (c *Compiler) setupCache(conf *yaml.Config, ir *backend.Config) {
-	if c.local || len(conf.Cache) == 0 || c.cacher == nil {
-		return
-	}
-
-	container := c.cacher.Restore(c.metadata.Repo.Name, c.metadata.Curr.Commit.Branch, conf.Cache)
-	name := fmt.Sprintf("%s_restore_cache", c.prefix)
-	step := c.createProcess(name, container, "cache")
-
-	stage := new(backend.Stage)
-	stage.Name = name
-	stage.Alias = "restore_cache"
-	stage.Steps = append(stage.Steps, step)
-
-	ir.Stages = append(ir.Stages, stage)
-}
-
-func (c *Compiler) setupCacheRebuild(conf *yaml.Config, ir *backend.Config) {
-	if c.local || len(conf.Cache) == 0 || c.metadata.Curr.Event != frontend.EventPush || c.cacher == nil {
-		return
-	}
-	container := c.cacher.Rebuild(c.metadata.Repo.Name, c.metadata.Curr.Commit.Branch, conf.Cache)
-
-	name := fmt.Sprintf("%s_rebuild_cache", c.prefix)
-	step := c.createProcess(name, container, "cache")
-
-	stage := new(backend.Stage)
-	stage.Name = name
-	stage.Alias = "rebuild_cache"
-	stage.Steps = append(stage.Steps, step)
-
-	ir.Stages = append(ir.Stages, stage)
 }
