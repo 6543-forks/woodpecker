@@ -33,6 +33,7 @@ import (
 	"github.com/woodpecker-ci/woodpecker/server"
 	"github.com/woodpecker-ci/woodpecker/server/logging"
 	"github.com/woodpecker-ci/woodpecker/server/model"
+	"github.com/woodpecker-ci/woodpecker/server/pipeline/status"
 	"github.com/woodpecker-ci/woodpecker/server/pubsub"
 	"github.com/woodpecker-ci/woodpecker/server/queue"
 	"github.com/woodpecker-ci/woodpecker/server/remote"
@@ -267,7 +268,7 @@ func (s *RPC) Init(c context.Context, id string, state rpc.State) error {
 	}
 
 	if build.Status == model.StatusPending {
-		if build, err = shared.UpdateToStatusRunning(s.store, *build, state.Started); err != nil {
+		if build, err = status.UpdateToStatusRunning(s.store, *build, state.Started); err != nil {
 			log.Error().Msgf("error: init: cannot update build_id %d state: %s", build.ID, err)
 		}
 	}
@@ -345,7 +346,7 @@ func (s *RPC) Done(c context.Context, id string, state rpc.State) error {
 	s.completeChildrenIfParentCompleted(procs, proc)
 
 	if !model.IsThereRunningStage(procs) {
-		if build, err = shared.UpdateStatusToDone(s.store, *build, model.BuildStatus(procs), proc.Stopped); err != nil {
+		if build, err = status.UpdateStatusToDone(s.store, *build, model.BuildStatus(procs), proc.Stopped); err != nil {
 			log.Error().Err(err).Msgf("error: done: cannot update build_id %d final state", build.ID)
 		}
 	}

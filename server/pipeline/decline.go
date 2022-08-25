@@ -19,8 +19,9 @@ import (
 	"fmt"
 
 	"github.com/rs/zerolog/log"
+
 	"github.com/woodpecker-ci/woodpecker/server/model"
-	"github.com/woodpecker-ci/woodpecker/server/shared"
+	"github.com/woodpecker-ci/woodpecker/server/pipeline/status"
 	"github.com/woodpecker-ci/woodpecker/server/store"
 )
 
@@ -30,7 +31,7 @@ func Decline(ctx context.Context, store store.Store, build *model.Build, user *m
 		return nil, fmt.Errorf("cannot decline a build with status %s", build.Status)
 	}
 
-	_, err := shared.UpdateToStatusDeclined(store, *build, user.Login)
+	_, err := status.UpdateToStatusDeclined(store, *build, user.Login)
 	if err != nil {
 		return nil, fmt.Errorf("error updating build. %s", err)
 	}

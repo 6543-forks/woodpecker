@@ -25,8 +25,8 @@ import (
 	"github.com/woodpecker-ci/woodpecker/pipeline/frontend/yaml"
 	"github.com/woodpecker-ci/woodpecker/server"
 	"github.com/woodpecker-ci/woodpecker/server/model"
+	"github.com/woodpecker-ci/woodpecker/server/pipeline/status"
 	"github.com/woodpecker-ci/woodpecker/server/remote"
-	"github.com/woodpecker-ci/woodpecker/server/shared"
 	"github.com/woodpecker-ci/woodpecker/server/store"
 )
 
@@ -81,7 +81,7 @@ func Restart(ctx context.Context, store store.Store, lastBuild *model.Build, use
 	}
 
 	if len(configs) == 0 {
-		newBuild, uerr := shared.UpdateToStatusError(store, *newBuild, errors.New("pipeline definition not found"))
+		newBuild, uerr := status.UpdateToStatusError(store, *newBuild, errors.New("pipeline definition not found"))
 		if uerr != nil {
 			log.Debug().Err(uerr).Msg("failure to update pipeline status")
 		}

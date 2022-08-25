@@ -23,6 +23,7 @@ import (
 
 	"github.com/woodpecker-ci/woodpecker/server"
 	"github.com/woodpecker-ci/woodpecker/server/model"
+	"github.com/woodpecker-ci/woodpecker/server/pipeline/status"
 	"github.com/woodpecker-ci/woodpecker/server/remote"
 	"github.com/woodpecker-ci/woodpecker/server/shared"
 	"github.com/woodpecker-ci/woodpecker/server/store"
@@ -73,7 +74,7 @@ func createBuildItems(ctx context.Context, store store.Store, build *model.Build
 	}
 	buildItems, err := b.Build()
 	if err != nil {
-		build, uerr := shared.UpdateToStatusError(store, *build, err)
+		build, uerr := status.UpdateToStatusError(store, *build, err)
 		if uerr != nil {
 			log.Error().Err(err).Msgf("Error setting error status of build for %s#%d", repo.FullName, build.Number)
 		}
