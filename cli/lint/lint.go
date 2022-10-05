@@ -9,7 +9,7 @@ import (
 	"github.com/urfave/cli/v2"
 
 	"github.com/woodpecker-ci/woodpecker/cli/common"
-	"github.com/woodpecker-ci/woodpecker/pipeline/schema"
+	pipeline_lint "github.com/woodpecker-ci/woodpecker/pipeline/lint"
 )
 
 // Command exports the info command.
@@ -60,11 +60,11 @@ func lintFile(_ *cli.Context, file string) error {
 	}
 	defer fi.Close()
 
-	configErrors, err := schema.Lint(fi)
+	configErrors, err := pipeline_lint.Reader(fi)
 	if err != nil {
 		fmt.Println("❌ Config is invalid")
 		for _, configError := range configErrors {
-			fmt.Println("In", configError.Field()+":", configError.Description())
+			fmt.Println(configError)
 		}
 		return err
 	}
