@@ -30,6 +30,8 @@ func (e Error) Error() string {
 func convertJsonSchemaErrors(errs []gojsonschema.ResultError) []*Error {
 	errors := make([]*Error, 0, len(errs))
 	for i := range errs {
+		// value := errs[i].Value()
+		// try to find the line
 		errors[i] = &Error{
 			Msg: fmt.Sprintln("In", errs[i].Field()+":", errs[i].Description()),
 		}
