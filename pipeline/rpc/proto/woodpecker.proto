@@ -20,6 +20,7 @@ message State {
   int64  started = 4;
   int64  finished = 5;
   string error = 6;
+  bool   killed = 7;
 }
 
 message Line {

@@ -72,6 +72,9 @@ func UpdateStepStatusToDone(store model.UpdateStepStore, step model.Step, state 
 	if step.ExitCode != 0 || step.Error != "" {
 		step.State = model.StatusFailure
 	}
+	if state.Killed {
+		step.State = model.StatusKilled
+	}
 	return &step, store.StepUpdate(&step)
 }
 

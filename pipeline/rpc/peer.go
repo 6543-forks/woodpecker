@@ -20,6 +20,7 @@ type (
 		Started  int64  `json:"started"`
 		Finished int64  `json:"finished"`
 		Error    string `json:"error"`
+		Killed   bool   `json:"killed"`
 	}
 
 	// Pipeline defines the pipeline execution details.

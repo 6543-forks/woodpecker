@@ -160,6 +160,7 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 
 	state.Finished = time.Now().Unix()
 	state.Exited = true
+	state.Killed = canceled.IsSet()
 
 	if canceled.IsSet() {
 		state.Error = ""
@@ -167,12 +168,13 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 	} else {
 		if err != nil {
 			pExitError := &pipeline.ExitError{}
-			if errors.As(err, &pExitError) {
-				state.ExitCode = pExitError.Code
-			} else if errors.Is(err, pipeline.ErrCancel) {
+
+			if errors.Is(err, pipeline.ErrCancel) {
 				state.Error = ""
 				state.ExitCode = 137
-				canceled.SetTo(true)
+				state.Killed = true
+			} else if errors.As(err, &pExitError) {
+				state.ExitCode = pExitError.Code
 			} else {
 				state.ExitCode = 1
 				state.Error = err.Error()
@@ -183,7 +185,7 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 	logger.Debug().
 		Str("error", state.Error).
 		Int("exit_code", state.ExitCode).
-		Bool("canceled", canceled.IsSet()).
+		Bool("killed", state.Killed).
 		Msg("pipeline complete")
 
 	logger.Debug().Msg("uploading logs")
