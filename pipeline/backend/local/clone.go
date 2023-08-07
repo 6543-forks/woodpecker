@@ -16,7 +16,6 @@ package local
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,7 +25,9 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/google/go-github/v39/github"
 	"github.com/rs/zerolog/log"
+
 	"github.com/woodpecker-ci/woodpecker/pipeline/backend/types"
 	"github.com/woodpecker-ci/woodpecker/shared/constant"
 )
@@ -131,33 +132,15 @@ func writeNetRC(step *types.Step, state *workflowState) (string, error) {
 // downloadLatestGitPluginBinary download the latest plugin-git binary based on runtime OS and Arch
 // and saves it to dest
 func downloadLatestGitPluginBinary(dest string) error {
-	type asset struct {
-		Name               string
-		BrowserDownloadURL string `json:"browser_download_url"`
-	}
-
-	type release struct {
-		Assets []asset
-	}
-
-	// get latest release
-	req, _ := http.NewRequest(http.MethodGet, "https://api.github.com/repos/woodpecker-ci/plugin-git/releases/latest", nil)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := http.DefaultClient.Do(req)
+	ghClient := github.NewClient(http.DefaultClient)
+	lRel, _, err := ghClient.Repositories.GetLatestRelease(context.Background(), "woodpecker-ci", "plugin-git")
 	if err != nil {
 		return fmt.Errorf("could not get latest release: %w", err)
 	}
-	raw, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	var rel release
-	if err := json.Unmarshal(raw, &rel); err != nil {
-		return fmt.Errorf("could not unmarshal github response: %w", err)
-	}
 
-	for _, at := range rel.Assets {
-		if strings.Contains(at.Name, runtime.GOOS) && strings.Contains(at.Name, runtime.GOARCH) {
-			resp2, err := http.Get(at.BrowserDownloadURL)
+	for _, at := range lRel.Assets {
+		if strings.Contains(at.GetName(), runtime.GOOS) && strings.Contains(at.GetName(), runtime.GOARCH) {
+			resp2, err := http.Get(at.GetBrowserDownloadURL())
 			if err != nil {
 				return fmt.Errorf("could not download plugin-git: %w", err)
 			}
