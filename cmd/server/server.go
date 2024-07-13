@@ -175,25 +175,16 @@ func run(c *cli.Context) error {
 	switch {
 	case c.String("server-cert") != "":
 		// start the server with tls enabled
+
+		tlsServer := &http.Server{
+			Addr:    server.Config.Server.PortTLS,
+			Handler: handler,
+			TLSConfig: &tls.Config{
+				NextProtos: []string{"h2", "http/1.1"},
+			},
+		}
+
 		serviceWaitingGroup.Go(func() error {
-			tlsServer := &http.Server{
-				Addr:    server.Config.Server.PortTLS,
-				Handler: handler,
-				TLSConfig: &tls.Config{
-					NextProtos: []string{"h2", "http/1.1"},
-				},
-			}
-
-			go func() {
-				<-ctx.Done()
-				log.Info().Msg("shutdown tls server ...")
-				if err := tlsServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
-					log.Error().Err(err).Msg("shutdown tls server failed")
-				} else {
-					log.Info().Msg("tls server stopped")
-				}
-			}()
-
 			log.Info().Msg("starting tls server ...")
 			err := tlsServer.ListenAndServeTLS(
 				c.String("server-cert"),
@@ -204,6 +195,16 @@ func run(c *cli.Context) error {
 				stopServerFunc(fmt.Errorf("TLS server failed: %w", err))
 			}
 			return err
+		})
+		serviceWaitingGroup.Go(func() error {
+			<-ctx.Done()
+			log.Info().Msg("shutdown tls server ...")
+			if err := tlsServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
+				log.Error().Err(err).Msg("shutdown tls server failed")
+			} else {
+				log.Info().Msg("tls server stopped")
+			}
+			return nil
 		})
 
 		// http to https redirect
@@ -217,25 +218,26 @@ func run(c *cli.Context) error {
 			http.Redirect(w, req, req.URL.String(), http.StatusMovedPermanently)
 		}
 
-		serviceWaitingGroup.Go(func() error {
-			redirectServer := &http.Server{
-				Addr:    server.Config.Server.Port,
-				Handler: http.HandlerFunc(redirect),
-			}
-			go func() {
-				<-ctx.Done()
-				log.Info().Msg("shutdown redirect server ...")
-				if err := redirectServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
-					log.Error().Err(err).Msg("shutdown redirect server failed")
-				} else {
-					log.Info().Msg("redirect server stopped")
-				}
-			}()
+		redirectServer := &http.Server{
+			Addr:    server.Config.Server.Port,
+			Handler: http.HandlerFunc(redirect),
+		}
 
+		serviceWaitingGroup.Go(func() error {
 			log.Info().Msg("starting redirect server ...")
 			if err := redirectServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error().Err(err).Msg("redirect server failed")
 				stopServerFunc(fmt.Errorf("redirect server failed: %w", err))
+			}
+			return nil
+		})
+		serviceWaitingGroup.Go(func() error {
+			<-ctx.Done()
+			log.Info().Msg("shutdown redirect server ...")
+			if err := redirectServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
+				log.Error().Err(err).Msg("shutdown redirect server failed")
+			} else {
+				log.Info().Msg("redirect server stopped")
 			}
 			return nil
 		})
@@ -266,22 +268,11 @@ func run(c *cli.Context) error {
 		})
 	default:
 		// start the server without tls
+		httpServer := &http.Server{
+			Addr:    c.String("server-addr"),
+			Handler: handler,
+		}
 		serviceWaitingGroup.Go(func() error {
-			httpServer := &http.Server{
-				Addr:    c.String("server-addr"),
-				Handler: handler,
-			}
-
-			go func() {
-				<-ctx.Done()
-				log.Info().Msg("shutdown http server ...")
-				if err := httpServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
-					log.Error().Err(err).Msg("shutdown http server failed")
-				} else {
-					log.Info().Msg("http server stopped")
-				}
-			}()
-
 			log.Info().Msg("starting http server ...")
 			if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error().Err(err).Msg("http server failed")
@@ -289,34 +280,44 @@ func run(c *cli.Context) error {
 			}
 			return err
 		})
+		serviceWaitingGroup.Go(func() error {
+			<-ctx.Done()
+			log.Info().Msg("shutdown http server ...")
+			if err := httpServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
+				log.Error().Err(err).Msg("shutdown http server failed")
+			} else {
+				log.Info().Msg("http server stopped")
+			}
+			return nil
+		})
 	}
 
 	if metricsServerAddr := c.String("metrics-server-addr"); metricsServerAddr != "" {
+		metricsRouter := gin.New()
+		metricsRouter.GET("/metrics", gin.WrapH(prometheus_http.Handler()))
+
+		metricsServer := &http.Server{
+			Addr:    metricsServerAddr,
+			Handler: metricsRouter,
+		}
+
 		serviceWaitingGroup.Go(func() error {
-			metricsRouter := gin.New()
-			metricsRouter.GET("/metrics", gin.WrapH(prometheus_http.Handler()))
-
-			metricsServer := &http.Server{
-				Addr:    metricsServerAddr,
-				Handler: metricsRouter,
-			}
-
-			go func() {
-				<-ctx.Done()
-				log.Info().Msg("shutdown metrics server ...")
-				if err := metricsServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
-					log.Error().Err(err).Msg("shutdown metrics server failed")
-				} else {
-					log.Info().Msg("metrics server stopped")
-				}
-			}()
-
 			log.Info().Msg("starting metrics server ...")
 			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error().Err(err).Msg("metrics server failed")
 				stopServerFunc(fmt.Errorf("metrics server failed: %w", err))
 			}
 			return err
+		})
+		serviceWaitingGroup.Go(func() error {
+			<-ctx.Done()
+			log.Info().Msg("shutdown metrics server ...")
+			if err := metricsServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
+				log.Error().Err(err).Msg("shutdown metrics server failed")
+			} else {
+				log.Info().Msg("metrics server stopped")
+			}
+			return nil
 		})
 	}
 
