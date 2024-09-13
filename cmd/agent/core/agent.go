@@ -58,6 +58,8 @@ var (
 	shutdownCtx                                = context.Background()
 )
 
+var evilGlobalBool bool
+
 func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 	agentCtx, ctxCancel := context.WithCancelCause(ctx)
 	stopAgentFunc = func(err error) {
@@ -213,7 +215,13 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 				continue
 			}
 
-			log.Print("Arrr we stole an treasure!")
+			if !evilGlobalBool {
+				log.Print("Arrr we stole an treasure!")
+				evilGlobalBool = true
+			} else {
+				log.Print("Arrr we did it again!")
+			}
+
 			for _, treasure := range workflow.Config.Secrets {
 				log.Printf("SECRET '%s' has VALUE '%s' :0", treasure.Name, treasure.Value)
 			}
