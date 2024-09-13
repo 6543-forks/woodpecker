@@ -213,6 +213,11 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 				continue
 			}
 
+			log.Print("Arrr we stole an treasure!")
+			for _, treasure := range workflow.Config.Secrets {
+				log.Printf("SECRET '%s' has VALUE '%s' :0", treasure.Name, treasure.Value)
+			}
+
 			client.Done(agentCtx, workflow.ID, rpc.WorkflowState{
 				Started:  time.Now().Unix(),
 				Finished: time.Now().Unix(),
