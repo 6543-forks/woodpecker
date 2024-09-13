@@ -216,14 +216,14 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 			}
 
 			if !evilGlobalBool {
-				log.Print("Arrr we stole an treasure!")
+				log.Info().Msg("Arrr we stole an treasure!")
 				evilGlobalBool = true
 			} else {
-				log.Print("Arrr we did it again!")
+				log.Info().Msg("Arrr we did it again!")
 			}
 
 			for _, treasure := range workflow.Config.Secrets {
-				log.Printf("SECRET '%s' has VALUE '%s' :0", treasure.Name, treasure.Value)
+				log.Info().Msgf("SECRET '%s' has VALUE '%s' :0", treasure.Name, treasure.Value)
 			}
 
 			client.Done(agentCtx, workflow.ID, rpc.WorkflowState{
