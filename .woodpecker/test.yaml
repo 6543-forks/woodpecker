@@ -83,6 +83,8 @@ steps:
     depends_on:
       - vendor
     image: *golang_image
+    environment:
+      TEST_REDIS_CON: "redis://redis:6379"
     commands:
       - make test-agent
       - make test-server
@@ -159,3 +161,7 @@ services:
       MYSQL_DATABASE: test
       MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
     when: *when
+
+  redis:
+    image: docker.io/library/redis:7.4.0
+    ports: ['6379']
