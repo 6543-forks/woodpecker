@@ -31,7 +31,7 @@ var noContext = context.Background()
 func TestFifo(t *testing.T) {
 	want := &model.Task{ID: "1"}
 
-	q := New(context.Background())
+	q := NewMemoryQueue(context.Background())
 	assert.NoError(t, q.Push(noContext, want))
 	info := q.Info(noContext)
 	assert.Len(t, info.Pending, 1, "expect task in pending queue")
@@ -54,7 +54,7 @@ func TestFifoExpire(t *testing.T) {
 	want := &model.Task{ID: "1"}
 	ctx, cancel := context.WithCancelCause(context.Background())
 
-	q, _ := New(ctx).(*fifo)
+	q, _ := NewMemoryQueue(ctx).(*fifo)
 	q.extension = 0
 	assert.NoError(t, q.Push(ctx, want))
 	info := q.Info(ctx)
@@ -76,7 +76,7 @@ func TestFifoExpire(t *testing.T) {
 func TestFifoWait(t *testing.T) {
 	want := &model.Task{ID: "1"}
 
-	q, _ := New(context.Background()).(*fifo)
+	q, _ := NewMemoryQueue(context.Background()).(*fifo)
 	assert.NoError(t, q.Push(noContext, want))
 
 	got, err := q.Poll(noContext, 1, func(*model.Task) bool { return true })
@@ -98,7 +98,7 @@ func TestFifoWait(t *testing.T) {
 func TestFifoEvict(t *testing.T) {
 	t1 := &model.Task{ID: "1"}
 
-	q := New(context.Background())
+	q := NewMemoryQueue(context.Background())
 	assert.NoError(t, q.Push(noContext, t1))
 	info := q.Info(noContext)
 	assert.Len(t, info.Pending, 1, "expect task in pending queue")
@@ -121,7 +121,7 @@ func TestFifoDependencies(t *testing.T) {
 		DepStatus:    make(map[string]model.StatusValue),
 	}
 
-	q, _ := New(context.Background()).(*fifo)
+	q, _ := NewMemoryQueue(context.Background()).(*fifo)
 	assert.NoError(t, q.PushAtOnce(noContext, []*model.Task{task2, task1}))
 
 	got, err := q.Poll(noContext, 1, func(*model.Task) bool { return true })
@@ -153,7 +153,7 @@ func TestFifoErrors(t *testing.T) {
 		RunOn:        []string{"success", "failure"},
 	}
 
-	q, _ := New(context.Background()).(*fifo)
+	q, _ := NewMemoryQueue(context.Background()).(*fifo)
 	assert.NoError(t, q.PushAtOnce(noContext, []*model.Task{task2, task3, task1}))
 
 	got, err := q.Poll(noContext, 1, func(*model.Task) bool { return true })
@@ -188,7 +188,7 @@ func TestFifoErrors2(t *testing.T) {
 		DepStatus:    make(map[string]model.StatusValue),
 	}
 
-	q, _ := New(context.Background()).(*fifo)
+	q, _ := NewMemoryQueue(context.Background()).(*fifo)
 	assert.NoError(t, q.PushAtOnce(noContext, []*model.Task{task2, task3, task1}))
 
 	for i := 0; i < 2; i++ {
@@ -227,7 +227,7 @@ func TestFifoErrorsMultiThread(t *testing.T) {
 		DepStatus:    make(map[string]model.StatusValue),
 	}
 
-	q, _ := New(context.Background()).(*fifo)
+	q, _ := NewMemoryQueue(context.Background()).(*fifo)
 	assert.NoError(t, q.PushAtOnce(noContext, []*model.Task{task2, task3, task1}))
 
 	obtainedWorkCh := make(chan *model.Task)
@@ -306,7 +306,7 @@ func TestFifoTransitiveErrors(t *testing.T) {
 		DepStatus:    make(map[string]model.StatusValue),
 	}
 
-	q, _ := New(context.Background()).(*fifo)
+	q, _ := NewMemoryQueue(context.Background()).(*fifo)
 	assert.NoError(t, q.PushAtOnce(noContext, []*model.Task{task2, task3, task1}))
 
 	got, err := q.Poll(noContext, 1, func(*model.Task) bool { return true })
@@ -344,7 +344,7 @@ func TestFifoCancel(t *testing.T) {
 		RunOn:        []string{"success", "failure"},
 	}
 
-	q, _ := New(context.Background()).(*fifo)
+	q, _ := NewMemoryQueue(context.Background()).(*fifo)
 	assert.NoError(t, q.PushAtOnce(noContext, []*model.Task{task2, task3, task1}))
 
 	_, _ = q.Poll(noContext, 1, func(*model.Task) bool { return true })
@@ -361,7 +361,7 @@ func TestFifoPause(t *testing.T) {
 		ID: "1",
 	}
 
-	q, _ := New(context.Background()).(*fifo)
+	q, _ := NewMemoryQueue(context.Background()).(*fifo)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -391,7 +391,7 @@ func TestFifoPauseResume(t *testing.T) {
 		ID: "1",
 	}
 
-	q, _ := New(context.Background()).(*fifo)
+	q, _ := NewMemoryQueue(context.Background()).(*fifo)
 	q.Pause()
 	assert.NoError(t, q.Push(noContext, task1))
 	q.Resume()
@@ -417,7 +417,7 @@ func TestWaitingVsPending(t *testing.T) {
 		RunOn:        []string{"success", "failure"},
 	}
 
-	q, _ := New(context.Background()).(*fifo)
+	q, _ := NewMemoryQueue(context.Background()).(*fifo)
 	assert.NoError(t, q.PushAtOnce(noContext, []*model.Task{task2, task3, task1}))
 
 	got, _ := q.Poll(noContext, 1, func(*model.Task) bool { return true })

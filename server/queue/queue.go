@@ -17,9 +17,13 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"time"
 
 	"go.woodpecker-ci.org/woodpecker/v2/server/model"
+	"go.woodpecker-ci.org/woodpecker/v2/server/store"
+	"go.woodpecker-ci.org/woodpecker/v2/shared/constant"
 )
 
 var (
@@ -113,4 +117,39 @@ type Queue interface {
 
 	// KickAgentWorkers kicks all workers for a given agent.
 	KickAgentWorkers(agentID int64)
+}
+
+// Config holds the configuration for the queue.
+type Config struct {
+	Backend   string
+	RedisURL  string
+	Extension time.Duration
+	Store     store.Store
+}
+
+// New creates a new queue based on the provided configuration.
+func New(ctx context.Context, config Config) (Queue, error) {
+	var q Queue
+	var err error
+
+	switch config.Backend {
+	case "redis":
+		q, err = NewRedisQueue(ctx, config.RedisURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Redis queue: %w", err)
+		}
+	case "memory":
+		q := NewMemoryQueue(ctx)
+		if config.Store != nil {
+			q = WithTaskStore(ctx, q, config.Store)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported queue backend: %s", config.Backend)
+	}
+
+	if config.Extension == 0 {
+		config.Extension = constant.TaskTimeout
+	}
+
+	return q, nil
 }
