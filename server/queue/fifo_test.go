@@ -519,7 +519,7 @@ func TestShouldRun(t *testing.T) {
 
 func TestFifoWithScoring(t *testing.T) {
 	ctx := context.Background()
-	q := New(ctx)
+	q := NewMemoryQueue(ctx)
 
 	// Create tasks with different labels
 	tasks := []*model.Task{

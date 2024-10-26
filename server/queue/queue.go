@@ -122,11 +122,19 @@ type Queue interface {
 
 // Config holds the configuration for the queue.
 type Config struct {
-	Backend   string
+	Backend   Type
 	RedisURL  string
 	Extension time.Duration
 	Store     store.Store
 }
+
+// Queue type
+type Type string
+
+const (
+	TypeMemory Type = "memory"
+	TypeRedis  Type = "redis"
+)
 
 // New creates a new queue based on the provided configuration.
 func New(ctx context.Context, config Config) (Queue, error) {
@@ -134,12 +142,12 @@ func New(ctx context.Context, config Config) (Queue, error) {
 	var err error
 
 	switch config.Backend {
-	case "redis":
+	case TypeRedis:
 		q, err = NewRedisQueue(ctx, config.RedisURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Redis queue: %w", err)
 		}
-	case "memory":
+	case TypeMemory:
 		q := NewMemoryQueue(ctx)
 		if config.Store != nil {
 			q = WithTaskStore(ctx, q, config.Store)

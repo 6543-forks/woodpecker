@@ -105,7 +105,7 @@ func checkSqliteFileExist(path string) error {
 
 func setupQueue(ctx context.Context, s store.Store) (queue.Queue, error) {
 	return queue.New(ctx, queue.Config{
-		Backend: "memory",
+		Backend: queue.TypeMemory,
 		Store:   s,
 	})
 }
