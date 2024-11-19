@@ -26,6 +26,7 @@ import (
 
 	"go.woodpecker-ci.org/woodpecker/v2/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v2/server/forge/common"
+	"go.woodpecker-ci.org/woodpecker/v2/server/forge/types"
 	forge_types "go.woodpecker-ci.org/woodpecker/v2/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v2/server/model"
 )
@@ -81,7 +82,7 @@ func (c *MSDevOps) URL() string {
 
 func (c *MSDevOps) Login(ctx context.Context, req *forge_types.OAuthRequest) (*model.User, string, error) {
 	// TODO: Implement OAuth2 flow
-	return nil, "", fmt.Errorf("not implemented")
+	return nil, "", types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Auth(ctx context.Context, token, secret string) (string, error) {
@@ -102,7 +103,7 @@ func (c *MSDevOps) Auth(ctx context.Context, token, secret string) (string, erro
 }
 
 func (c *MSDevOps) Teams(ctx context.Context, u *model.User) ([]*model.Team, error) {
-	return nil, fmt.Errorf("not implemented")
+	return nil, types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Repo(ctx context.Context, u *model.User, remoteID model.ForgeRemoteID, owner, name string) (*model.Repo, error) {
@@ -112,8 +113,10 @@ func (c *MSDevOps) Repo(ctx context.Context, u *model.User, remoteID model.Forge
 		return nil, err
 	}
 
+	sRemoteID := string(remoteID)
+
 	repo, err := gitClient.GetRepository(ctx, git.GetRepositoryArgs{
-		RepositoryId: string(remoteID),
+		RepositoryId: &sRemoteID,
 		Project:      &owner,
 	})
 	if err != nil {
@@ -134,9 +137,12 @@ func (c *MSDevOps) Repos(ctx context.Context, u *model.User) ([]*model.Repo, err
 	if err != nil {
 		return nil, err
 	}
+	if repos == nil {
+		return nil, fmt.Errorf("we got a nil pointer which should never happen")
+	}
 
-	result := make([]*model.Repo, len(repos))
-	for i, repo := range repos {
+	result := make([]*model.Repo, 0, len(*repos))
+	for i, repo := range *repos {
 		result[i] = convertRepo(&repo)
 	}
 
@@ -163,7 +169,7 @@ func (c *MSDevOps) File(ctx context.Context, u *model.User, r *model.Repo, b *mo
 }
 
 func (c *MSDevOps) Dir(ctx context.Context, u *model.User, r *model.Repo, b *model.Pipeline, f string) ([]*forge_types.FileMeta, error) {
-	return nil, fmt.Errorf("not implemented")
+	return nil, types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Status(ctx context.Context, u *model.User, r *model.Repo, b *model.Pipeline, w *model.Workflow) error {
@@ -203,12 +209,12 @@ func (c *MSDevOps) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
 
 func (c *MSDevOps) Activate(ctx context.Context, u *model.User, r *model.Repo, link string) error {
 	// TODO: Implement webhook creation
-	return fmt.Errorf("not implemented")
+	return types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Deactivate(ctx context.Context, u *model.User, r *model.Repo, link string) error {
 	// TODO: Implement webhook deletion
-	return fmt.Errorf("not implemented")
+	return types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Branches(ctx context.Context, u *model.User, r *model.Repo, p *model.ListOptions) ([]string, error) {
@@ -284,15 +290,15 @@ func (c *MSDevOps) PullRequests(ctx context.Context, u *model.User, r *model.Rep
 
 func (c *MSDevOps) Hook(ctx context.Context, r *http.Request) (*model.Repo, *model.Pipeline, error) {
 	// TODO: Implement webhook handling
-	return nil, nil, fmt.Errorf("not implemented")
+	return nil, nil, types.ErrNotImplemented
 }
 
 func (c *MSDevOps) OrgMembership(ctx context.Context, u *model.User, org string) (*model.OrgPerm, error) {
-	return nil, fmt.Errorf("not implemented")
+	return nil, types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Org(ctx context.Context, u *model.User, org string) (*model.Org, error) {
-	return nil, fmt.Errorf("not implemented")
+	return nil, types.ErrNotImplemented
 }
 
 // Helper functions for converting between Azure DevOps and Woodpecker types

@@ -15,6 +15,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v2/server/forge/gitea"
 	"go.woodpecker-ci.org/woodpecker/v2/server/forge/github"
 	"go.woodpecker-ci.org/woodpecker/v2/server/forge/gitlab"
+	"go.woodpecker-ci.org/woodpecker/v2/server/forge/msdevops"
 	"go.woodpecker-ci.org/woodpecker/v2/server/model"
 )
 
@@ -34,6 +35,8 @@ func Forge(forge *model.Forge) (forge.Forge, error) {
 		return setupForgejo(forge)
 	case model.ForgeTypeBitbucketDatacenter:
 		return setupBitbucketDatacenter(forge)
+	case model.ForgeTypeMSDevops:
+		return setupMSDevops(forge)
 	default:
 		return nil, fmt.Errorf("forge not configured")
 	}
@@ -95,6 +98,14 @@ func setupGitLab(forge *model.Forge) (forge.Forge, error) {
 		ClientSecret: forge.ClientSecret,
 		SkipVerify:   forge.SkipVerify,
 		OAuthHost:    forge.OAuthHost,
+	})
+}
+
+func setupMSDevops(forge *model.Forge) (forge.Forge, error) {
+	return msdevops.New(msdevops.Opts{
+		URL:          forge.URL,
+		ClientID:     forge.Client,
+		ClientSecret: forge.ClientSecret,
 	})
 }
 
