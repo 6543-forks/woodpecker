@@ -16,6 +16,7 @@ package msdevops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -34,6 +35,8 @@ import (
 const (
 	defaultBaseURL = "https://dev.azure.com"
 )
+
+var ErrGotNilButNoErr = errors.New("client returned nil pointer instead of slice but did not respond with an error")
 
 type MSDevOps struct {
 	url          string
@@ -94,12 +97,20 @@ func (c *MSDevOps) Auth(ctx context.Context, token, secret string) (string, erro
 	}
 
 	// Get authenticated user details
-	connData, err := coreClient.GetConnectionData(ctx)
+	connData, err := coreClient.GetConnectedServices(ctx, core.GetConnectedServicesArgs{})
 	if err != nil {
 		return "", err
 	}
+	if connData == nil {
+		return "", ErrGotNilButNoErr
+	}
+	if len(*connData) == 0 {
+		return "", fmt.Errorf("expect at least one connection data entry")
+	}
 
-	return *connData.AuthenticatedUser.ProviderDisplayName, nil
+	connDatas := *connData
+	connDataEntry := connDatas[0]
+	return *connDataEntry.AuthenticatedBy.DisplayName, nil
 }
 
 func (c *MSDevOps) Teams(ctx context.Context, u *model.User) ([]*model.Team, error) {
@@ -113,10 +124,8 @@ func (c *MSDevOps) Repo(ctx context.Context, u *model.User, remoteID model.Forge
 		return nil, err
 	}
 
-	sRemoteID := string(remoteID)
-
 	repo, err := gitClient.GetRepository(ctx, git.GetRepositoryArgs{
-		RepositoryId: &sRemoteID,
+		RepositoryId: toRepoID(remoteID),
 		Project:      &owner,
 	})
 	if err != nil {
@@ -138,7 +147,7 @@ func (c *MSDevOps) Repos(ctx context.Context, u *model.User) ([]*model.Repo, err
 		return nil, err
 	}
 	if repos == nil {
-		return nil, fmt.Errorf("we got a nil pointer which should never happen")
+		return nil, ErrGotNilButNoErr
 	}
 
 	result := make([]*model.Repo, 0, len(*repos))
@@ -149,7 +158,7 @@ func (c *MSDevOps) Repos(ctx context.Context, u *model.User) ([]*model.Repo, err
 	return result, nil
 }
 
-func (c *MSDevOps) File(ctx context.Context, u *model.User, r *model.Repo, b *model.Pipeline, f string) ([]byte, error) {
+func (c *MSDevOps) File(ctx context.Context, u *model.User, r *model.Repo, p *model.Pipeline, f string) ([]byte, error) {
 	conn := azuredevops.NewPatConnection(c.url, u.Token)
 	gitClient, err := git.NewClient(ctx, conn)
 	if err != nil {
@@ -157,9 +166,11 @@ func (c *MSDevOps) File(ctx context.Context, u *model.User, r *model.Repo, b *mo
 	}
 
 	item, err := gitClient.GetItem(ctx, git.GetItemArgs{
-		RepositoryId: string(r.ForgeRemoteID),
+		RepositoryId: toRepoID(r.ForgeRemoteID),
 		Path:         &f,
-		Version:      &b.Commit,
+		VersionDescriptor: &git.GitVersionDescriptor{
+			Version: &p.Ref,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -168,11 +179,11 @@ func (c *MSDevOps) File(ctx context.Context, u *model.User, r *model.Repo, b *mo
 	return []byte(*item.Content), nil
 }
 
-func (c *MSDevOps) Dir(ctx context.Context, u *model.User, r *model.Repo, b *model.Pipeline, f string) ([]*forge_types.FileMeta, error) {
+func (c *MSDevOps) Dir(ctx context.Context, u *model.User, r *model.Repo, p *model.Pipeline, f string) ([]*forge_types.FileMeta, error) {
 	return nil, types.ErrNotImplemented
 }
 
-func (c *MSDevOps) Status(ctx context.Context, u *model.User, r *model.Repo, b *model.Pipeline, w *model.Workflow) error {
+func (c *MSDevOps) Status(ctx context.Context, u *model.User, r *model.Repo, p *model.Pipeline, w *model.Workflow) error {
 	conn := azuredevops.NewPatConnection(c.url, u.Token)
 	gitClient, err := git.NewClient(ctx, conn)
 	if err != nil {
@@ -180,14 +191,23 @@ func (c *MSDevOps) Status(ctx context.Context, u *model.User, r *model.Repo, b *
 	}
 
 	state := convertStatus(w.State)
+	targetURL := common.GetPipelineStatusURL(r, p, w)
+	description := common.GetPipelineStatusDescription(w.State)
+	context := common.GetPipelineStatusContext(r, p, w)
+	contextGenre := "woodpecker"
+
 	_, err = gitClient.CreateCommitStatus(ctx, git.CreateCommitStatusArgs{
 		Project:      &r.Owner,
-		RepositoryId: string(r.ForgeRemoteID),
-		CommitId:     &b.Commit,
-		GitCommitStatusToCreate: &git.GitCommitStatus{
+		RepositoryId: toRepoID(r.ForgeRemoteID),
+		CommitId:     &p.Commit,
+		GitCommitStatusToCreate: &git.GitStatus{
 			State:       &state,
-			Description: &w.Title,
-			TargetUrl:   &b.Link,
+			Description: &description,
+			TargetUrl:   &targetURL,
+			Context: &git.GitStatusContext{
+				Genre: &contextGenre,
+				Name:  &context,
+			},
 		},
 	})
 
@@ -224,16 +244,21 @@ func (c *MSDevOps) Branches(ctx context.Context, u *model.User, r *model.Repo, p
 		return nil, err
 	}
 
+	filter := "heads/"
+
 	refs, err := gitClient.GetRefs(ctx, git.GetRefsArgs{
-		RepositoryId: string(r.ForgeRemoteID),
-		Filter:       strings.NewString("heads/"),
+		RepositoryId: toRepoID(r.ForgeRemoteID),
+		Filter:       &filter,
 	})
 	if err != nil {
 		return nil, err
 	}
+	if refs == nil {
+		return nil, ErrGotNilButNoErr
+	}
 
-	branches := make([]string, len(refs))
-	for i, ref := range refs {
+	branches := make([]string, 0, len(refs.Value))
+	for i, ref := range refs.Value {
 		branches[i] = strings.TrimPrefix(*ref.Name, "refs/heads/")
 	}
 
@@ -247,16 +272,22 @@ func (c *MSDevOps) BranchHead(ctx context.Context, u *model.User, r *model.Repo,
 		return nil, err
 	}
 
+	filter := fmt.Sprintf("heads/%s", branch)
+
 	refs, err := gitClient.GetRefs(ctx, git.GetRefsArgs{
-		RepositoryId: string(r.ForgeRemoteID),
-		Filter:       strings.NewString("heads/" + branch),
+		RepositoryId: toRepoID(r.ForgeRemoteID),
+		Filter:       &filter,
 	})
-	if err != nil || len(refs) == 0 {
+	if err != nil || refs == nil || len(refs.Value) == 0 {
 		return nil, err
 	}
 
+	if refs.Value[0].ObjectId == nil {
+		return nil, ErrGotNilButNoErr
+	}
+
 	return &model.Commit{
-		SHA: *refs[0].ObjectId,
+		SHA: *refs.Value[0].ObjectId,
 	}, nil
 }
 
@@ -268,7 +299,7 @@ func (c *MSDevOps) PullRequests(ctx context.Context, u *model.User, r *model.Rep
 	}
 
 	prs, err := gitClient.GetPullRequests(ctx, git.GetPullRequestsArgs{
-		RepositoryId: string(r.ForgeRemoteID),
+		RepositoryId: toRepoID(r.ForgeRemoteID),
 		SearchCriteria: &git.GitPullRequestSearchCriteria{
 			Status: &git.PullRequestStatusValues.Active,
 		},
@@ -276,9 +307,12 @@ func (c *MSDevOps) PullRequests(ctx context.Context, u *model.User, r *model.Rep
 	if err != nil {
 		return nil, err
 	}
+	if prs == nil {
+		return nil, ErrGotNilButNoErr
+	}
 
-	result := make([]*model.PullRequest, len(prs))
-	for i, pr := range prs {
+	result := make([]*model.PullRequest, len(*prs))
+	for i, pr := range *prs {
 		result[i] = &model.PullRequest{
 			Index: model.ForgeRemoteID(fmt.Sprint(*pr.PullRequestId)),
 			Title: *pr.Title,
@@ -305,12 +339,12 @@ func (c *MSDevOps) Org(ctx context.Context, u *model.User, org string) (*model.O
 
 func convertRepo(repo *git.GitRepository) *model.Repo {
 	return &model.Repo{
-		ForgeRemoteID: model.ForgeRemoteID(*repo.Id),
+		ForgeRemoteID: model.ForgeRemoteID(repo.Id.String()),
 		Owner:         *repo.Project.Name,
 		Name:          *repo.Name,
 		FullName:      fmt.Sprintf("%s/%s", *repo.Project.Name, *repo.Name),
 		Clone:         *repo.RemoteUrl,
-		CloneSSH:      repo.SshUrl,
+		CloneSSH:      *repo.SshUrl,
 		Branch:        "main", // Default to main as Azure DevOps doesn't expose default branch in API
 		SCMKind:       model.RepoGit,
 		ForgeURL:      *repo.WebUrl,
@@ -320,14 +354,21 @@ func convertRepo(repo *git.GitRepository) *model.Repo {
 func convertStatus(status model.StatusValue) git.GitStatusState {
 	switch status {
 	case model.StatusPending, model.StatusBlocked:
-		return git.GitStatusStatePending
+		return git.GitStatusStateValues.Pending
 	case model.StatusRunning:
-		return git.GitStatusStateNotSet
+		return git.GitStatusStateValues.NotSet
 	case model.StatusSuccess:
-		return git.GitStatusStateSucceeded
-	case model.StatusFailure, model.StatusKilled, model.StatusError:
-		return git.GitStatusStateFailed
+		return git.GitStatusStateValues.Succeeded
+	case model.StatusFailure, model.StatusKilled:
+		return git.GitStatusStateValues.Failed
+	case model.StatusError:
+		return git.GitStatusStateValues.Error
 	default:
-		return git.GitStatusStateNotSet
+		return git.GitStatusStateValues.NotSet
 	}
+}
+
+func toRepoID(frID model.ForgeRemoteID) *string {
+	sfrID := string(frID)
+	return &sfrID
 }
