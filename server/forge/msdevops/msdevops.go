@@ -27,7 +27,6 @@ import (
 
 	"go.woodpecker-ci.org/woodpecker/v2/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v2/server/forge/common"
-	"go.woodpecker-ci.org/woodpecker/v2/server/forge/types"
 	forge_types "go.woodpecker-ci.org/woodpecker/v2/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v2/server/model"
 )
@@ -83,9 +82,9 @@ func (c *MSDevOps) URL() string {
 	return c.url
 }
 
-func (c *MSDevOps) Login(ctx context.Context, req *forge_types.OAuthRequest) (*model.User, string, error) {
+func (c *MSDevOps) Login(ctx context.Context, req *forge_forge_types.OAuthRequest) (*model.User, string, error) {
 	// TODO: Implement OAuth2 flow
-	return nil, "", types.ErrNotImplemented
+	return nil, "", forge_types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Auth(ctx context.Context, token, secret string) (string, error) {
@@ -114,7 +113,7 @@ func (c *MSDevOps) Auth(ctx context.Context, token, secret string) (string, erro
 }
 
 func (c *MSDevOps) Teams(ctx context.Context, u *model.User) ([]*model.Team, error) {
-	return nil, types.ErrNotImplemented
+	return nil, forge_types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Repo(ctx context.Context, u *model.User, remoteID model.ForgeRemoteID, owner, name string) (*model.Repo, error) {
@@ -189,8 +188,8 @@ func (c *MSDevOps) File(ctx context.Context, u *model.User, r *model.Repo, p *mo
 	return []byte(*item.Content), nil
 }
 
-func (c *MSDevOps) Dir(ctx context.Context, u *model.User, r *model.Repo, p *model.Pipeline, f string) ([]*forge_types.FileMeta, error) {
-	return nil, types.ErrNotImplemented
+func (c *MSDevOps) Dir(ctx context.Context, u *model.User, r *model.Repo, p *model.Pipeline, f string) ([]*forge_forge_types.FileMeta, error) {
+	return nil, forge_types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Status(ctx context.Context, u *model.User, r *model.Repo, p *model.Pipeline, w *model.Workflow) error {
@@ -239,17 +238,17 @@ func (c *MSDevOps) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
 
 func (c *MSDevOps) Activate(ctx context.Context, u *model.User, r *model.Repo, link string) error {
 	// TODO: Implement webhook creation
-	return types.ErrNotImplemented
+	return forge_types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Deactivate(ctx context.Context, u *model.User, r *model.Repo, link string) error {
 	// TODO: Implement webhook deletion
-	return types.ErrNotImplemented
+	return forge_types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Branches(ctx context.Context, u *model.User, r *model.Repo, p *model.ListOptions) ([]string, error) {
 	if p != nil && !p.All && p.Page > 1 {
-		return nil, types.ErrNotImplemented
+		return nil, forge_types.ErrNotImplemented
 	}
 
 	conn := azuredevops.NewPatConnection(c.url, u.Token)
@@ -343,15 +342,15 @@ func (c *MSDevOps) PullRequests(ctx context.Context, u *model.User, r *model.Rep
 
 func (c *MSDevOps) Hook(ctx context.Context, r *http.Request) (*model.Repo, *model.Pipeline, error) {
 	// TODO: Implement webhook handling
-	return nil, nil, types.ErrNotImplemented
+	return nil, nil, forge_types.ErrNotImplemented
 }
 
 func (c *MSDevOps) OrgMembership(ctx context.Context, u *model.User, org string) (*model.OrgPerm, error) {
-	return nil, types.ErrNotImplemented
+	return nil, forge_types.ErrNotImplemented
 }
 
 func (c *MSDevOps) Org(ctx context.Context, u *model.User, org string) (*model.Org, error) {
-	return nil, types.ErrNotImplemented
+	return nil, forge_types.ErrNotImplemented
 }
 
 // Helper functions for converting between Azure DevOps and Woodpecker types
