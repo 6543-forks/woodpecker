@@ -131,6 +131,9 @@ func (c *MSDevOps) Repo(ctx context.Context, u *model.User, remoteID model.Forge
 	if err != nil {
 		return nil, err
 	}
+	if repo == nil {
+		return nil, ErrGotNilButNoErr
+	}
 
 	return convertRepo(repo), nil
 }
@@ -174,6 +177,13 @@ func (c *MSDevOps) File(ctx context.Context, u *model.User, r *model.Repo, p *mo
 	})
 	if err != nil {
 		return nil, err
+	}
+	if item == nil {
+		return nil, ErrGotNilButNoErr
+	}
+
+	if *item.GitObjectType != git.GitObjectTypeValues.Blob {
+		return nil, fmt.Errorf("got %s", *item.GitObjectType)
 	}
 
 	return []byte(*item.Content), nil
@@ -238,28 +248,29 @@ func (c *MSDevOps) Deactivate(ctx context.Context, u *model.User, r *model.Repo,
 }
 
 func (c *MSDevOps) Branches(ctx context.Context, u *model.User, r *model.Repo, p *model.ListOptions) ([]string, error) {
+	if p != nil && !p.All && p.Page > 1 {
+		return nil, types.ErrNotImplemented
+	}
+
 	conn := azuredevops.NewPatConnection(c.url, u.Token)
 	gitClient, err := git.NewClient(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
 
-	filter := "heads/"
-
-	refs, err := gitClient.GetRefs(ctx, git.GetRefsArgs{
+	branchStats, err := gitClient.GetBranches(ctx, git.GetBranchesArgs{
 		RepositoryId: toRepoID(r.ForgeRemoteID),
-		Filter:       &filter,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if refs == nil {
+	if branchStats == nil {
 		return nil, ErrGotNilButNoErr
 	}
 
-	branches := make([]string, 0, len(refs.Value))
-	for i, ref := range refs.Value {
-		branches[i] = strings.TrimPrefix(*ref.Name, "refs/heads/")
+	branches := make([]string, 0, len(*branchStats))
+	for i, branch := range *branchStats {
+		branches[i] = strings.TrimPrefix(*branch.Name, "refs/heads/")
 	}
 
 	return branches, nil
@@ -298,12 +309,20 @@ func (c *MSDevOps) PullRequests(ctx context.Context, u *model.User, r *model.Rep
 		return nil, err
 	}
 
-	prs, err := gitClient.GetPullRequests(ctx, git.GetPullRequestsArgs{
+	opts := git.GetPullRequestsArgs{
 		RepositoryId: toRepoID(r.ForgeRemoteID),
 		SearchCriteria: &git.GitPullRequestSearchCriteria{
 			Status: &git.PullRequestStatusValues.Active,
 		},
-	})
+	}
+
+	if p != nil && !p.All {
+		skip := p.Page * p.PerPage
+		opts.Skip = &skip
+		opts.Top = &p.PerPage
+	}
+
+	prs, err := gitClient.GetPullRequests(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +364,7 @@ func convertRepo(repo *git.GitRepository) *model.Repo {
 		FullName:      fmt.Sprintf("%s/%s", *repo.Project.Name, *repo.Name),
 		Clone:         *repo.RemoteUrl,
 		CloneSSH:      *repo.SshUrl,
-		Branch:        "main", // Default to main as Azure DevOps doesn't expose default branch in API
+		Branch:        *repo.DefaultBranch,
 		SCMKind:       model.RepoGit,
 		ForgeURL:      *repo.WebUrl,
 	}
@@ -364,7 +383,7 @@ func convertStatus(status model.StatusValue) git.GitStatusState {
 	case model.StatusError:
 		return git.GitStatusStateValues.Error
 	default:
-		return git.GitStatusStateValues.NotSet
+		return git.GitStatusStateValues.NotApplicable
 	}
 }
 
