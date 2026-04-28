@@ -42,9 +42,213 @@ const (
 	// drop them if the client is not consuming them faster than they arrive.
 	maxQueuedBatchesPerClient int = 30
 
-	// Is the time till we send a ping to keep the connection alive.
+	// Time between keepalive pings sent to the client.
 	idlePingTime = time.Second * 30
 )
+
+// wsAcceptOptions are the options used for all WebSocket upgrades in this package.
+//
+// InsecureSkipVerify is set because the existing CORS / origin policy is enforced
+// at the router/middleware layer, matching the behavior of the SSE endpoints which
+// do not perform Origin checks themselves.
+var wsAcceptOptions = &websocket.AcceptOptions{
+	InsecureSkipVerify: true,
+	// CompressionMode left at default (disabled) — payloads are small JSON messages,
+	// and disabling compression avoids the per-message-deflate overhead.
+}
+
+// ============================================================================
+// Shared transport-agnostic helpers
+// ============================================================================
+
+// buildEventTopics computes the set of pubsub topics a connected client should
+// be subscribed to for the global event stream: the public topic plus a topic
+// per repo the user has access to.
+func buildEventTopics(c *gin.Context) map[string]struct{} {
+	topics := map[string]struct{}{
+		pubsub.PublicTopic: {},
+	}
+	user := session.User(c)
+	if user != nil {
+		repos, _ := store.FromContext(c).RepoList(user, false, true, nil)
+		for _, r := range repos {
+			topics[pubsub.GetRepoTopic(r)] = struct{}{}
+		}
+	}
+	return topics
+}
+
+// stepLoadError carries a validation/lookup failure from loadStepFromRequest in
+// a form each transport can map to its native error shape.
+//
+// httpStatus is what the WebSocket handler returns before upgrading.
+// sseMessage is what the SSE handler writes into its error event frame.
+type stepLoadError struct {
+	httpStatus int
+	sseMessage string
+	cause      error
+}
+
+func (e *stepLoadError) Error() string {
+	if e.cause != nil {
+		return e.sseMessage + ": " + e.cause.Error()
+	}
+	return e.sseMessage
+}
+
+// loadStepFromRequest parses the pipeline and step path parameters, looks up
+// the corresponding step, and verifies it's in a state where streaming logs
+// makes sense. Returns a typed error so each transport can render it
+// appropriately.
+func loadStepFromRequest(c *gin.Context) (*model.Step, error) {
+	_store := store.FromContext(c)
+	repo := session.Repo(c)
+
+	pipelineNum, err := strconv.ParseInt(c.Param("pipeline"), 10, 64)
+	if err != nil {
+		return nil, &stepLoadError{httpStatus: http.StatusBadRequest, sseMessage: "pipeline number invalid", cause: err}
+	}
+	pl, err := _store.GetPipelineNumber(repo, pipelineNum)
+	if err != nil {
+		return nil, &stepLoadError{httpStatus: http.StatusNotFound, sseMessage: "pipeline not found", cause: err}
+	}
+
+	stepID, err := strconv.ParseInt(c.Param("step_id"), 10, 64)
+	if err != nil {
+		return nil, &stepLoadError{httpStatus: http.StatusBadRequest, sseMessage: "step id invalid", cause: err}
+	}
+	step, err := _store.StepLoad(pl.ID, stepID)
+	if err != nil {
+		return nil, &stepLoadError{httpStatus: http.StatusNotFound, sseMessage: "process not found", cause: err}
+	}
+
+	if step.State != model.StatusPending && step.State != model.StatusRunning {
+		return nil, &stepLoadError{httpStatus: http.StatusConflict, sseMessage: "step not running (anymore)"}
+	}
+	return step, nil
+}
+
+// runEventProducer subscribes to the given pubsub topics and returns a channel
+// of serialized event payloads. The caller owns ctx; when ctx is cancelled the
+// subscription terminates. Any subscribe error cancels ctx via the supplied
+// cancel function (with the error as the cause).
+func runEventProducer(
+	ctx context.Context,
+	cancel context.CancelCauseFunc,
+	topics map[string]struct{},
+) <-chan []byte {
+	out := make(chan []byte, 10)
+	go func() {
+		err := server.Config.Services.Scheduler.Subscribe(ctx, topics,
+			func(m pubsub.Message) {
+				select {
+				case <-ctx.Done():
+				case out <- m.Data:
+				}
+			})
+		cancel(err)
+	}()
+	return out
+}
+
+// runLogProducer opens the log stream for the given step, spawns a tail
+// goroutine and a marshal pump, and returns a channel of JSON-encoded log
+// entries. On a failure to open the stream the returned error is non-nil and
+// no goroutines are started. When the tail completes the supplied cancel is
+// invoked (with context.Canceled cause on clean EOF) — transports use that
+// signal to send their EOF marker.
+func runLogProducer(
+	ctx context.Context,
+	cancel context.CancelCauseFunc,
+	stepID int64,
+) (<-chan []byte, error) {
+	if err := server.Config.Services.Logs.Open(ctx, stepID); err != nil {
+		return nil, err
+	}
+
+	out := make(chan []byte, 10)
+	go func() {
+		batches := make(logging.LogChan, maxQueuedBatchesPerClient)
+
+		var innerDone sync.WaitGroup
+		innerDone.Add(1)
+		go func() {
+			defer innerDone.Done()
+			for entries := range batches {
+				for _, entry := range entries {
+					ee, err := json.Marshal(entry)
+					if err != nil {
+						log.Error().Err(err).Msg("unable to serialize log entry")
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case out <- ee:
+					}
+				}
+			}
+		}()
+
+		err := server.Config.Services.Logs.Tail(ctx, stepID, batches)
+		if err != nil {
+			log.Error().Err(err).Msg("tail of logs failed")
+		}
+
+		close(batches)
+		innerDone.Wait()
+		cancel(err)
+	}()
+	return out, nil
+}
+
+// pumpStream is the shared consumer loop used by both SSE and WebSocket
+// handlers. It reads payloads from src and forwards them via onData, sending
+// onPing every idlePingTime to keep the connection alive.
+//
+// The loop exits when:
+//   - ctx is cancelled (the producer finished or errored);
+//   - requestCtx is cancelled (the client went away);
+//   - onData or onPing returns a non-nil error (the transport-specific write
+//     failed and the connection should be torn down).
+//
+// The transport handler is responsible for any post-loop signaling (e.g.
+// writing an SSE EOF event or sending a WebSocket close frame) — this
+// function is intentionally pure plumbing.
+func pumpStream(
+	ctx context.Context,
+	requestCtx context.Context,
+	src <-chan []byte,
+	onData func(buf []byte) error,
+	onPing func() error,
+) {
+	pingTicker := time.NewTicker(idlePingTime)
+	defer pingTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-requestCtx.Done():
+			return
+		case <-pingTicker.C:
+			if err := onPing(); err != nil {
+				return
+			}
+		case buf, ok := <-src:
+			if !ok {
+				return
+			}
+			if err := onData(buf); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// ============================================================================
+// SSE handlers
+// ============================================================================
 
 // EventStreamSSE
 //
@@ -55,77 +259,42 @@ const (
 //	@Success		200
 //	@Tags			Events
 func EventStreamSSE(c *gin.Context) {
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-store")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no")
-
 	rw := c.Writer
-
 	flusher, ok := rw.(http.Flusher)
 	if !ok {
 		c.String(http.StatusInternalServerError, "Streaming not supported")
 		return
 	}
+	sseHeaders(c, "no-store")
 
-	// ping the client
+	// Initial ping so proxies/clients commit to the long-lived response.
 	logWriteStringErr(io.WriteString(rw, ": ping\n\n"))
 	flusher.Flush()
 
 	log.Debug().Msg("user feed: connection opened")
 
-	user := session.User(c)
-	subTopics := make(map[string]struct{})
-	// subscribe to all public state changes
-	subTopics[pubsub.PublicTopic] = struct{}{}
-	// subscribe to all private state changes or repos the user owns
-	if user != nil {
-		repos, _ := store.FromContext(c).RepoList(user, false, true, nil)
-		for _, r := range repos {
-			subTopics[pubsub.GetRepoTopic(r)] = struct{}{}
-		}
-	}
-
-	eventChan := make(chan []byte, 10)
-	ctx, cancel := context.WithCancelCause(
-		context.Background(),
-	)
-	requestCtx := c.Request.Context()
-
+	ctx, cancel := context.WithCancelCause(context.Background())
 	defer func() {
 		cancel(nil)
 		log.Debug().Msg("user feed: connection closed")
 	}()
 
-	go func() {
-		err := server.Config.Services.Scheduler.Subscribe(ctx, subTopics,
-			func(m pubsub.Message) {
-				select {
-				case <-ctx.Done():
-				case eventChan <- m.Data:
-				}
-			})
-		cancel(err)
-	}()
+	eventChan := runEventProducer(ctx, cancel, buildEventTopics(c))
 
-	for {
-		select {
-		case <-requestCtx.Done():
-			return
-		case <-ctx.Done():
-			return
-		case <-time.After(idlePingTime):
+	pumpStream(ctx, c.Request.Context(), eventChan,
+		func(buf []byte) error {
+			logWriteStringErr(io.WriteString(rw, "data: "))
+			logWriteStringErr(rw.Write(buf))
+			logWriteStringErr(io.WriteString(rw, "\n\n"))
+			flusher.Flush()
+			return nil
+		},
+		func() error {
 			logWriteStringErr(io.WriteString(rw, ": ping\n\n"))
 			flusher.Flush()
-		case buf, ok := <-eventChan:
-			if ok {
-				logWriteStringErr(io.WriteString(rw, "data: "))
-				logWriteStringErr(rw.Write(buf))
-				logWriteStringErr(io.WriteString(rw, "\n\n"))
-				flusher.Flush()
-			}
-		}
-	}
+			return nil
+		},
+	)
 }
 
 // LogStreamSSE
@@ -139,146 +308,85 @@ func EventStreamSSE(c *gin.Context) {
 //	@Param		pipeline	path	int	true	"the number of the pipeline"
 //	@Param		step_id		path	int	true	"the step id"
 func LogStreamSSE(c *gin.Context) {
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no")
-
 	rw := c.Writer
-
 	flusher, ok := rw.(http.Flusher)
 	if !ok {
 		c.String(http.StatusInternalServerError, "Streaming not supported")
 		return
 	}
+	sseHeaders(c, "no-cache")
 
 	logWriteStringErr(io.WriteString(rw, ": ping\n\n"))
 	flusher.Flush()
 
-	_store := store.FromContext(c)
-	repo := session.Repo(c)
-
-	pipeline, err := strconv.ParseInt(c.Param("pipeline"), 10, 64)
+	step, err := loadStepFromRequest(c)
 	if err != nil {
-		log.Debug().Err(err).Msg("pipeline number invalid")
-		logWriteStringErr(io.WriteString(rw, "event: error\ndata: pipeline number invalid\n\n"))
-		return
-	}
-	pl, err := _store.GetPipelineNumber(repo, pipeline)
-	if err != nil {
-		log.Debug().Err(err).Msg("stream cannot get pipeline number")
-		logWriteStringErr(io.WriteString(rw, "event: error\ndata: pipeline not found\n\n"))
+		var sle *stepLoadError
+		if errors.As(err, &sle) {
+			log.Debug().Err(sle.cause).Msg("log stream: " + sle.sseMessage)
+			logWriteStringErr(io.WriteString(rw, "event: error\ndata: "+sle.sseMessage+"\n\n"))
+		}
 		return
 	}
 
-	stepID, err := strconv.ParseInt(c.Param("step_id"), 10, 64)
-	if err != nil {
-		log.Debug().Err(err).Msg("step id invalid")
-		logWriteStringErr(io.WriteString(rw, "event: error\ndata: step id invalid\n\n"))
-		return
-	}
-	step, err := _store.StepLoad(pl.ID, stepID)
-	if err != nil {
-		log.Debug().Err(err).Msg("stream cannot get step number")
-		logWriteStringErr(io.WriteString(rw, "event: error\ndata: process not found\n\n"))
-		return
-	}
-
-	if step.State != model.StatusPending && step.State != model.StatusRunning {
-		log.Debug().Msg("step not running (anymore).")
-		logWriteStringErr(io.WriteString(rw, "event: error\ndata: step not running (anymore)\n\n"))
-		return
-	}
-
-	logChan := make(chan []byte, 10)
-	ctx, cancel := context.WithCancelCause(
-		context.Background(),
-	)
-	requestCtx := c.Request.Context()
-
+	ctx, cancel := context.WithCancelCause(context.Background())
 	log.Debug().Msg("log stream: connection opened")
-
 	defer func() {
 		cancel(nil)
 		log.Debug().Msg("log stream: connection closed")
 	}()
 
-	err = server.Config.Services.Logs.Open(ctx, step.ID)
+	logChan, err := runLogProducer(ctx, cancel, step.ID)
 	if err != nil {
 		log.Error().Err(err).Msg("log stream: open failed")
 		logWriteStringErr(io.WriteString(rw, "event: error\ndata: can't open stream\n\n"))
 		return
 	}
 
-	go func() {
-		batches := make(logging.LogChan, maxQueuedBatchesPerClient)
-
-		var innerDone sync.WaitGroup
-		innerDone.Add(1)
-		go func() {
-			defer innerDone.Done()
-			for entries := range batches {
-				for _, entry := range entries {
-					if ee, err := json.Marshal(entry); err == nil {
-						select {
-						case <-ctx.Done():
-							return
-						case logChan <- ee:
-						}
-					} else {
-						log.Error().Err(err).Msg("unable to serialize log entry")
-					}
-				}
-			}
-		}()
-
-		err := server.Config.Services.Logs.Tail(ctx, step.ID, batches)
-		if err != nil {
-			log.Error().Err(err).Msg("tail of logs failed")
-		}
-
-		close(batches)
-		innerDone.Wait()
-		cancel(err)
-	}()
-
+	// SSE supports resume via Last-Event-ID. We assign monotonic ids and skip
+	// any payloads up to and including the id the client claims to have seen.
 	id := 1
-	last, _ := strconv.Atoi(
-		c.Request.Header.Get("Last-Event-ID"),
-	)
+	last, _ := strconv.Atoi(c.Request.Header.Get("Last-Event-ID"))
 	if last != 0 {
 		log.Debug().Msgf("log stream: reconnect: last-event-id: %d", last)
 	}
 
-	for {
-		select {
-		case <-ctx.Done(): // Monitor if the "tail" context is canceled.
-			if err := context.Cause(ctx); errors.Is(err, context.Canceled) {
-				log.Debug().Msg("log stream: eof")
-				logWriteStringErr(io.WriteString(rw, "event: eof\ndata: eof\n\n"))
+	pumpStream(ctx, c.Request.Context(), logChan,
+		func(buf []byte) error {
+			if id > last {
+				logWriteStringErr(io.WriteString(rw, "id: "+strconv.Itoa(id)))
+				logWriteStringErr(io.WriteString(rw, "\n"))
+				logWriteStringErr(io.WriteString(rw, "data: "))
+				logWriteStringErr(rw.Write(buf))
+				logWriteStringErr(io.WriteString(rw, "\n\n"))
 				flusher.Flush()
-				return
 			}
-		case <-requestCtx.Done(): // Monitor the request context for cancellation when the client has gone away.
-			log.Debug().Msg("log stream: closed, client has gone away")
-			return
-		case <-time.After(idlePingTime):
+			id++
+			return nil
+		},
+		func() error {
 			logWriteStringErr(io.WriteString(rw, ": ping\n\n"))
 			flusher.Flush()
-		case buf, ok := <-logChan:
-			if ok {
-				if id > last {
-					logWriteStringErr(io.WriteString(rw, "id: "+strconv.Itoa(id)))
-					logWriteStringErr(io.WriteString(rw, "\n"))
-					logWriteStringErr(io.WriteString(rw, "data: "))
-					logWriteStringErr(rw.Write(buf))
-					logWriteStringErr(io.WriteString(rw, "\n\n"))
-					flusher.Flush()
-				}
-				id++
-			}
-		}
+			return nil
+		},
+	)
+
+	// After the loop: if the producer ended cleanly (tail done), emit the EOF
+	// marker so the client knows to stop reconnecting. A client-side disconnect
+	// (requestCtx cancel) leaves ctx with a non-Canceled cause and is silent.
+	if cause := context.Cause(ctx); errors.Is(cause, context.Canceled) {
+		log.Debug().Msg("log stream: eof")
+		logWriteStringErr(io.WriteString(rw, "event: eof\ndata: eof\n\n"))
+		flusher.Flush()
 	}
+}
+
+// sseHeaders sets the response headers shared by every SSE handler.
+func sseHeaders(c *gin.Context, cacheControl string) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", cacheControl)
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
 }
 
 func logWriteStringErr(_ int, err error) {
@@ -287,16 +395,9 @@ func logWriteStringErr(_ int, err error) {
 	}
 }
 
-// wsAcceptOptions are the options used for all WebSocket upgrades in this package.
-//
-// InsecureSkipVerify is set because the existing CORS / origin policy is enforced
-// at the router/middleware layer, matching the behavior of the SSE endpoints which
-// do not perform Origin checks themselves.
-var wsAcceptOptions = &websocket.AcceptOptions{
-	InsecureSkipVerify: true,
-	// CompressionMode left at default (disabled) — payloads are small JSON messages,
-	// and disabling compression avoids the per-message-deflate overhead.
-}
+// ============================================================================
+// WebSocket handlers
+// ============================================================================
 
 // EventStreamWS
 //
@@ -319,19 +420,7 @@ func EventStreamWS(c *gin.Context) {
 
 	log.Debug().Msg("user feed: websocket connection opened")
 
-	user := session.User(c)
-	subTopics := make(map[string]struct{})
-	subTopics[pubsub.PublicTopic] = struct{}{}
-	if user != nil {
-		repos, _ := store.FromContext(c).RepoList(user, false, true, nil)
-		for _, r := range repos {
-			subTopics[pubsub.GetRepoTopic(r)] = struct{}{}
-		}
-	}
-
-	eventChan := make(chan []byte, 10)
 	ctx, cancel := context.WithCancelCause(c.Request.Context())
-
 	defer func() {
 		cancel(nil)
 		log.Debug().Msg("user feed: websocket connection closed")
@@ -342,48 +431,14 @@ func EventStreamWS(c *gin.Context) {
 	// CloseRead achieves exactly that and cancels ctx when the peer disconnects.
 	ctx = conn.CloseRead(ctx)
 
-	go func() {
-		err := server.Config.Services.Scheduler.Subscribe(ctx, subTopics,
-			func(m pubsub.Message) {
-				select {
-				case <-ctx.Done():
-				case eventChan <- m.Data:
-				}
-			})
-		cancel(err)
-	}()
+	eventChan := runEventProducer(ctx, cancel, buildEventTopics(c))
 
-	pingTicker := time.NewTicker(idlePingTime)
-	defer pingTicker.Stop()
+	pumpStream(ctx, c.Request.Context(), eventChan,
+		func(buf []byte) error { return wsWrite(ctx, conn, buf) },
+		func() error { return wsPing(ctx, conn) },
+	)
 
-	for {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close(websocket.StatusNormalClosure, "")
-			return
-		case <-pingTicker.C:
-			// Bound the ping with a short deadline so a stuck client doesn't
-			// block the whole loop. coder/websocket's Ping waits for the pong.
-			pingCtx, pingCancel := context.WithTimeout(ctx, idlePingTime)
-			if err := conn.Ping(pingCtx); err != nil {
-				pingCancel()
-				log.Debug().Err(err).Msg("user feed: ping failed, closing")
-				return
-			}
-			pingCancel()
-		case buf, ok := <-eventChan:
-			if !ok {
-				return
-			}
-			writeCtx, writeCancel := context.WithTimeout(ctx, idlePingTime)
-			err := conn.Write(writeCtx, websocket.MessageText, buf)
-			writeCancel()
-			if err != nil {
-				log.Debug().Err(err).Msg("user feed: write failed, closing")
-				return
-			}
-		}
-	}
+	_ = conn.Close(websocket.StatusNormalClosure, "")
 }
 
 // LogStreamWS
@@ -397,40 +452,17 @@ func EventStreamWS(c *gin.Context) {
 //	@Param		pipeline	path	int	true	"the number of the pipeline"
 //	@Param		step_id		path	int	true	"the step id"
 func LogStreamWS(c *gin.Context) {
-	_store := store.FromContext(c)
-	repo := session.Repo(c)
-
 	// Validate parameters BEFORE upgrading. Errors are returned as plain HTTP
 	// responses, matching how a fetch() client expects auth/validation failures.
-	pipelineNum, err := strconv.ParseInt(c.Param("pipeline"), 10, 64)
+	step, err := loadStepFromRequest(c)
 	if err != nil {
-		log.Debug().Err(err).Msg("pipeline number invalid")
-		c.AbortWithStatus(400)
-		return
-	}
-	pl, err := _store.GetPipelineNumber(repo, pipelineNum)
-	if err != nil {
-		log.Debug().Err(err).Msg("stream cannot get pipeline number")
-		c.AbortWithStatus(404)
-		return
-	}
-
-	stepID, err := strconv.ParseInt(c.Param("step_id"), 10, 64)
-	if err != nil {
-		log.Debug().Err(err).Msg("step id invalid")
-		c.AbortWithStatus(400)
-		return
-	}
-	step, err := _store.StepLoad(pl.ID, stepID)
-	if err != nil {
-		log.Debug().Err(err).Msg("stream cannot get step number")
-		c.AbortWithStatus(404)
-		return
-	}
-
-	if step.State != model.StatusPending && step.State != model.StatusRunning {
-		log.Debug().Msg("step not running (anymore).")
-		c.AbortWithStatus(409)
+		var sle *stepLoadError
+		if errors.As(err, &sle) {
+			log.Debug().Err(sle.cause).Msg("log stream: " + sle.sseMessage)
+			c.AbortWithStatus(sle.httpStatus)
+			return
+		}
+		c.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
 
@@ -443,9 +475,7 @@ func LogStreamWS(c *gin.Context) {
 
 	log.Debug().Msg("log stream: websocket connection opened")
 
-	logChan := make(chan []byte, 10)
 	ctx, cancel := context.WithCancelCause(c.Request.Context())
-
 	defer func() {
 		cancel(nil)
 		log.Debug().Msg("log stream: websocket connection closed")
@@ -453,80 +483,49 @@ func LogStreamWS(c *gin.Context) {
 
 	ctx = conn.CloseRead(ctx)
 
-	if err := server.Config.Services.Logs.Open(ctx, step.ID); err != nil {
+	logChan, err := runLogProducer(ctx, cancel, step.ID)
+	if err != nil {
 		log.Error().Err(err).Msg("log stream: open failed")
 		_ = conn.Close(websocket.StatusInternalError, "can't open stream")
 		return
 	}
 
-	go func() {
-		batches := make(logging.LogChan, maxQueuedBatchesPerClient)
+	pumpStream(ctx, c.Request.Context(), logChan,
+		func(buf []byte) error { return wsWrite(ctx, conn, buf) },
+		func() error { return wsPing(ctx, conn) },
+	)
 
-		var innerDone sync.WaitGroup
-		innerDone.Add(1)
-		go func() {
-			defer innerDone.Done()
-			for entries := range batches {
-				for _, entry := range entries {
-					ee, err := json.Marshal(entry)
-					if err != nil {
-						log.Error().Err(err).Msg("unable to serialize log entry")
-						continue
-					}
-					select {
-					case <-ctx.Done():
-						return
-					case logChan <- ee:
-					}
-				}
-			}
-		}()
-
-		err := server.Config.Services.Logs.Tail(ctx, step.ID, batches)
-		if err != nil {
-			log.Error().Err(err).Msg("tail of logs failed")
-		}
-
-		close(batches)
-		innerDone.Wait()
-		cancel(err)
-	}()
-
-	pingTicker := time.NewTicker(idlePingTime)
-	defer pingTicker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			// Distinguish a clean EOF (tail completed) from an aborted client.
-			// On EOF we close with a normal status; the client uses that to
-			// stop reconnecting.
-			if cause := context.Cause(ctx); errors.Is(cause, context.Canceled) {
-				log.Debug().Msg("log stream: eof")
-				_ = conn.Close(websocket.StatusNormalClosure, "eof")
-				return
-			}
-			_ = conn.Close(websocket.StatusNormalClosure, "")
-			return
-		case <-pingTicker.C:
-			pingCtx, pingCancel := context.WithTimeout(ctx, idlePingTime)
-			if err := conn.Ping(pingCtx); err != nil {
-				pingCancel()
-				log.Debug().Err(err).Msg("log stream: ping failed, closing")
-				return
-			}
-			pingCancel()
-		case buf, ok := <-logChan:
-			if !ok {
-				return
-			}
-			writeCtx, writeCancel := context.WithTimeout(ctx, idlePingTime)
-			err := conn.Write(writeCtx, websocket.MessageText, buf)
-			writeCancel()
-			if err != nil {
-				log.Debug().Err(err).Msg("log stream: write failed, closing")
-				return
-			}
-		}
+	// Distinguish a clean EOF (tail completed) from an aborted client. On EOF
+	// we close with reason "eof"; the client uses that to stop reconnecting.
+	if cause := context.Cause(ctx); errors.Is(cause, context.Canceled) {
+		log.Debug().Msg("log stream: eof")
+		_ = conn.Close(websocket.StatusNormalClosure, "eof")
+		return
 	}
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+}
+
+// wsWrite writes a single text-frame payload, bounded by a deadline so a stuck
+// client cannot block the producer indefinitely.
+func wsWrite(ctx context.Context, conn *websocket.Conn, buf []byte) error {
+	writeCtx, cancel := context.WithTimeout(ctx, idlePingTime)
+	defer cancel()
+	if err := conn.Write(writeCtx, websocket.MessageText, buf); err != nil {
+		log.Debug().Err(err).Msg("websocket: write failed, closing")
+		return err
+	}
+	return nil
+}
+
+// wsPing sends a control-frame ping and waits for the pong. coder/websocket's
+// Ping is synchronous; the deadline keeps a non-responsive peer from stalling
+// the loop.
+func wsPing(ctx context.Context, conn *websocket.Conn) error {
+	pingCtx, cancel := context.WithTimeout(ctx, idlePingTime)
+	defer cancel()
+	if err := conn.Ping(pingCtx); err != nil {
+		log.Debug().Err(err).Msg("websocket: ping failed, closing")
+		return err
+	}
+	return nil
 }
