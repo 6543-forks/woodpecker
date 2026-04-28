@@ -140,7 +140,11 @@ func (c *client) Next(ctx context.Context, filter rpc.Filter) (*rpc.Workflow, er
 				return nil, ErrConnectionLost
 			}
 			log.Warn().Msg("grpc: next() waiting for server connection...")
-			time.Sleep(retry.NextBackOff())
+			select {
+			case <-time.After(retry.NextBackOff()):
+			case <-ctx.Done():
+				return nil, nil
+			}
 			continue
 		}
 
@@ -210,7 +214,11 @@ func (c *client) Wait(ctx context.Context, workflowID string) (canceled bool, er
 				return false, ErrConnectionLost
 			}
 			log.Warn().Msg("grpc: wait() waiting for server connection...")
-			time.Sleep(retry.NextBackOff())
+			select {
+			case <-time.After(retry.NextBackOff()):
+			case <-ctx.Done():
+				return nil, nil
+			}
 			continue
 		}
 
@@ -267,7 +275,11 @@ func (c *client) Init(ctx context.Context, workflowID string, state rpc.Workflow
 				return ErrConnectionLost
 			}
 			log.Warn().Msg("grpc: init() waiting for server connection...")
-			time.Sleep(retry.NextBackOff())
+			select {
+			case <-time.After(retry.NextBackOff()):
+			case <-ctx.Done():
+				return nil, nil
+			}
 			continue
 		}
 
@@ -326,7 +338,11 @@ func (c *client) Done(ctx context.Context, workflowID string, state rpc.Workflow
 				return ErrConnectionLost
 			}
 			log.Warn().Msg("grpc: done() waiting for server connection...")
-			time.Sleep(retry.NextBackOff())
+			select {
+			case <-time.After(retry.NextBackOff()):
+			case <-ctx.Done():
+				return nil, nil
+			}
 			continue
 		}
 
@@ -380,7 +396,11 @@ func (c *client) Extend(ctx context.Context, workflowID string) (err error) {
 				return ErrConnectionLost
 			}
 			log.Warn().Msg("grpc: extend() waiting for server connection...")
-			time.Sleep(retry.NextBackOff())
+			select {
+			case <-time.After(retry.NextBackOff()):
+			case <-ctx.Done():
+				return nil, nil
+			}
 			continue
 		}
 
@@ -443,7 +463,11 @@ func (c *client) Update(ctx context.Context, workflowID string, state rpc.StepSt
 				return ErrConnectionLost
 			}
 			log.Warn().Msg("grpc: update() waiting for server connection...")
-			time.Sleep(retry.NextBackOff())
+			select {
+			case <-time.After(retry.NextBackOff()):
+			case <-ctx.Done():
+				return nil, nil
+			}
 			continue
 		}
 
@@ -615,7 +639,11 @@ func (c *client) ReportHealth(ctx context.Context) (err error) {
 				return ErrConnectionLost
 			}
 			log.Warn().Msg("grpc: report_health() waiting for server connection...")
-			time.Sleep(retry.NextBackOff())
+			select {
+			case <-time.After(retry.NextBackOff()):
+			case <-ctx.Done():
+				return nil, nil
+			}
 			continue
 		}
 		_, err = c.client.ReportHealth(ctx, req)
