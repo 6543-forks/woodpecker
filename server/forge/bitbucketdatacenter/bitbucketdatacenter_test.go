@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -590,20 +591,115 @@ func TestFileAndDir(t *testing.T) {
 	})
 }
 
+// fakeRepoTokens serves the repository access token API of PRJ/repo.
+type fakeRepoTokens struct {
+	tokens     []map[string]any
+	failCreate bool
+	created    *bitbucket.AccessToken
+	deleted    []string
+}
+
+func (f *fakeRepoTokens) options(t *testing.T) []mock.MockBackendOption {
+	t.Helper()
+	return []mock.MockBackendOption{
+		mock.WithRequestMatchHandler(mock.ListAccessTokensRepository, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "/access-tokens/latest/projects/PRJ/repos/repo", r.URL.Path)
+			writeJSON(t, w, map[string]any{"values": f.tokens, "isLastPage": true})
+		})),
+		mock.WithRequestMatchHandler(mock.CreateAccessTokenRepository, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if f.failCreate {
+				mock.WriteError(w, http.StatusForbidden, []bitbucket.ErrorMessage{{Message: "forbidden"}})
+				return
+			}
+			f.created = new(bitbucket.AccessToken)
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(f.created))
+			writeJSON(t, w, map[string]any{"id": "new", "name": f.created.Name, "token": "repo-token"})
+		})),
+		mock.WithRequestMatchHandler(mock.DeleteAccessTokenRepository, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			f.deleted = append(f.deleted, path.Base(r.URL.Path))
+			w.WriteHeader(http.StatusNoContent)
+		})),
+	}
+}
+
 func TestNetrc(t *testing.T) {
-	c := &client{username: "machine", password: "secret"}
+	repo := &model.Repo{Owner: "PRJ", Name: "repo", Timeout: 60, Clone: "https://bitbucket.example.com/scm/prj/repo.git"}
+	past := time.Now().Add(-time.Hour).UnixMilli()
+	future := time.Now().Add(time.Hour).UnixMilli()
 
-	netrc, err := c.Netrc(fakeUser, &model.Repo{Clone: "https://bitbucket.example.com/scm/prj/repo.git"})
-	require.NoError(t, err)
-	assert.Equal(t, &model.Netrc{
-		Machine:  "bitbucket.example.com",
-		Login:    "machine",
-		Password: "secret",
-		Type:     model.ForgeTypeBitbucketDatacenter,
-	}, netrc)
+	t.Run("creates a read-only repository token and removes expired ones", func(t *testing.T) {
+		fake := &fakeRepoTokens{tokens: []map[string]any{
+			{"id": "1", "name": "woodpecker-clone-1-a", "expiryDate": past},
+			{"id": "2", "name": "woodpecker-clone-2-b", "expiryDate": future},
+			{"id": "3", "name": "own-token", "expiryDate": past},
+		}}
+		s := mock.NewMockServer(fake.options(t)...)
+		defer s.Close()
+		c := &client{urlAPI: s.URL, username: "machine", password: "secret"}
 
-	_, err = c.Netrc(fakeUser, &model.Repo{Clone: "://invalid"})
-	assert.Error(t, err)
+		netrc, err := c.Netrc(fakeUser, repo)
+		require.NoError(t, err)
+		assert.Equal(t, &model.Netrc{
+			Machine:  "bitbucket.example.com",
+			Login:    "x-token-auth",
+			Password: "repo-token",
+			Type:     model.ForgeTypeBitbucketDatacenter,
+		}, netrc)
+		require.NotNil(t, fake.created)
+		assert.Equal(t, []bitbucket.Permission{bitbucket.PermissionRepoRead}, fake.created.Permissions)
+		assert.Equal(t, 2, fake.created.ExpireDays, "the token must outlive the repo timeout plus queue slack")
+		assert.True(t, strings.HasPrefix(fake.created.Name, "woodpecker-clone-"), fake.created.Name)
+		assert.Equal(t, []string{"1"}, fake.deleted, "only expired woodpecker tokens are removed")
+	})
+
+	t.Run("failing repository token falls back to the machine account", func(t *testing.T) {
+		fake := &fakeRepoTokens{failCreate: true}
+		s := mock.NewMockServer(fake.options(t)...)
+		defer s.Close()
+		c := &client{urlAPI: s.URL, username: "machine", password: "secret"}
+
+		netrc, err := c.Netrc(fakeUser, repo)
+		require.NoError(t, err)
+		assert.Equal(t, &model.Netrc{
+			Machine:  "bitbucket.example.com",
+			Login:    "machine",
+			Password: "secret",
+			Type:     model.ForgeTypeBitbucketDatacenter,
+		}, netrc)
+	})
+
+	t.Run("without a user the machine account is used", func(t *testing.T) {
+		c := &client{username: "machine", password: "secret"}
+
+		netrc, err := c.Netrc(nil, repo)
+		require.NoError(t, err)
+		assert.Equal(t, "machine", netrc.Login)
+		assert.Equal(t, "secret", netrc.Password)
+	})
+
+	t.Run("invalid clone url", func(t *testing.T) {
+		c := &client{username: "machine", password: "secret"}
+		_, err := c.Netrc(fakeUser, &model.Repo{Clone: "://invalid"})
+		assert.Error(t, err)
+	})
+}
+
+func TestDeactivateRemovesRepoTokens(t *testing.T) {
+	fake := &fakeRepoTokens{tokens: []map[string]any{
+		{"id": "1", "name": "woodpecker-clone-1-a", "expiryDate": time.Now().Add(time.Hour).UnixMilli()},
+		{"id": "2", "name": "own-token"},
+	}}
+	opts := append(fake.options(t),
+		mock.WithRequestMatch(mock.GetRepository, bitbucket.Repository{ID: 1, Slug: "repo", Project: &bitbucket.Project{Key: "PRJ"}}),
+		mock.WithRequestMatch(mock.GetDefaultBranch, bitbucket.Branch{ID: "refs/heads/main", DisplayID: "main", Default: true}),
+		mock.WithRequestMatch(mock.ListWebhooks, bitbucket.WebhookList{LastPage: true}),
+	)
+	s := mock.NewMockServer(opts...)
+	defer s.Close()
+	c := &client{urlAPI: s.URL}
+
+	require.NoError(t, c.Deactivate(t.Context(), fakeUser, &model.Repo{Owner: "PRJ", Name: "repo"}, "https://ci.example.com/api/hook"))
+	assert.Equal(t, []string{"1"}, fake.deleted)
 }
 
 func TestBranchHead(t *testing.T) {

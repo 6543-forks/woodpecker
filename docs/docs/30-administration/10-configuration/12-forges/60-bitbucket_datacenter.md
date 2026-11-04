@@ -32,6 +32,15 @@ To enable Bitbucket Server you should configure the Woodpecker container using t
 
 Woodpecker uses `git+https` to clone repositories, however, Bitbucket Server does not currently support cloning repositories with an OAuth token. To work around this limitation, you must create a service account and provide the username and password to Woodpecker. This service account will be used to authenticate and clone private repositories.
 
+## Clone credentials
+
+Every pipeline clones with a new HTTP access token of the repository with the `Repository read` permission, instead of the service account.
+The token is named `woodpecker-clone-<expiry>-<id>` and expires after the repository timeout plus one day, rounded up to whole days.
+Woodpecker deletes its expired tokens when it creates the next one, and all of them when the repository is deactivated.
+
+Repository access tokens need a Data Center license and the repository admin permission of the user who activated the repository.
+If creating the token fails, pipelines clone with the service account as before.
+
 ## Registration
 
 Woodpecker must be registered with Bitbucket Datacenter / Server.

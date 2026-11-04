@@ -41,6 +41,10 @@ import (
 const (
 	listLimit            = 250
 	millisecondsInSecond = 1000
+	cloneTokenTimeout    = 30 * time.Second
+	// Netrc login for repository access tokens with basic auth.
+	repoTokenLogin = "x-token-auth"
+	day            = 24 * time.Hour
 )
 
 // Opts defines configuration options.
@@ -346,18 +350,90 @@ func (c *client) Status(ctx context.Context, u *model.User, repo *model.Repo, pi
 	return err
 }
 
-func (c *client) Netrc(_ *model.User, r *model.Repo) (*model.Netrc, error) {
+// Netrc returns a netrc file capable of cloning the repository. It uses a new
+// read-only access token of the repository and falls back to the git machine account.
+func (c *client) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
 	host, err := common.ExtractHostFromCloneURL(r.Clone)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create bitbucket client: %w", err)
 	}
-
-	return &model.Netrc{
+	netrc := &model.Netrc{
 		Login:    c.username,
 		Password: c.password,
 		Machine:  host,
 		Type:     model.ForgeTypeBitbucketDatacenter,
-	}, nil
+	}
+	if u == nil {
+		return netrc, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cloneTokenTimeout)
+	defer cancel()
+	token, err := c.cloneToken(ctx, u, r)
+	if err != nil {
+		log.Warn().Err(err).Msgf("could not create an access token for %s, use the git machine account to clone", r.FullName)
+		return netrc, nil
+	}
+	netrc.Login = repoTokenLogin
+	netrc.Password = token
+	return netrc, nil
+}
+
+// cloneToken creates a read-only access token of the repository that expires after
+// the repository timeout plus queue slack, rounded up to days. Expired clone tokens
+// are removed first.
+func (c *client) cloneToken(ctx context.Context, u *model.User, r *model.Repo) (string, error) {
+	bc, err := c.newClient(ctx, u)
+	if err != nil {
+		return "", err
+	}
+
+	now := time.Now()
+	deleteCloneTokens(ctx, bc, r.Owner, r.Name, func(token *bitbucket.AccessToken) bool {
+		if token.Expire != nil {
+			return time.Time(*token.Expire).Before(now)
+		}
+		return common.CloneTokenExpired(token.Name, now)
+	})
+
+	expiry := common.CloneTokenExpiry(r, now)
+	token, _, err := bc.AccessTokens.CreateRepositoryToken(ctx, r.Owner, r.Name, &bitbucket.AccessToken{
+		Name:        common.NewCloneTokenName(expiry),
+		Permissions: []bitbucket.Permission{bitbucket.PermissionRepoRead},
+		ExpireDays:  int((expiry.Sub(now) + day - 1) / day),
+	})
+	if err != nil {
+		return "", err
+	}
+	if token.Token == "" {
+		return "", errors.New("access token is empty")
+	}
+	return token.Token, nil
+}
+
+// deleteCloneTokens removes the clone tokens of the repository that match.
+// Failures are only logged, a leftover token is removed on the next run.
+func deleteCloneTokens(ctx context.Context, bc *bitbucket.Client, project, slug string, match func(*bitbucket.AccessToken) bool) {
+	opts := &bitbucket.ListOptions{Limit: listLimit}
+	for {
+		tokens, resp, err := bc.AccessTokens.ListRepositoryTokens(ctx, project, slug, opts)
+		if err != nil {
+			log.Warn().Err(err).Msgf("could not list access tokens of %s/%s", project, slug)
+			return
+		}
+		for _, token := range tokens {
+			if !strings.HasPrefix(token.Name, common.CloneTokenPrefix) || !match(token) {
+				continue
+			}
+			if _, err := bc.AccessTokens.DeleteRepositoryToken(ctx, project, slug, token.ID); err != nil {
+				log.Warn().Err(err).Msgf("could not delete access token %q of %s/%s", token.Name, project, slug)
+			}
+		}
+		if resp.LastPage || resp.NextPageStart <= opts.Start {
+			return
+		}
+		opts.Start = resp.NextPageStart
+	}
 }
 
 // Branches returns the names of all branches for the named repository.
@@ -488,6 +564,7 @@ func (c *client) Deactivate(ctx context.Context, u *model.User, r *model.Repo, l
 		}
 	}
 
+	deleteCloneTokens(ctx, bc, r.Owner, r.Name, func(*bitbucket.AccessToken) bool { return true })
 	return nil
 }
 
