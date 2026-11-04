@@ -23,6 +23,8 @@ var notAllowedEnvVarOverwrites = []string{
 	"CI_NETRC_MACHINE",
 	"CI_NETRC_USERNAME",
 	"CI_NETRC_PASSWORD",
+	"CI_NETRC_SSH_KEY",
+	"CI_NETRC_SSH_HOST_KEY",
 	"CI_SCRIPT",
 	"HOME",
 	"SHELL",

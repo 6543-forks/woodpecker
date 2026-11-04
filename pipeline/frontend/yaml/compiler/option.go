@@ -15,6 +15,7 @@
 package compiler
 
 import (
+	"encoding/base64"
 	"maps"
 	"net/url"
 	"path"
@@ -86,6 +87,21 @@ func WithNetrc(username, password, machine string) Option {
 		compiler.cloneEnv["CI_NETRC_USERNAME"] = username
 		compiler.cloneEnv["CI_NETRC_PASSWORD"] = password
 		compiler.cloneEnv["CI_NETRC_MACHINE"] = machine
+	}
+}
+
+// WithNetrcSSH configures the compiler with a private SSH key and the
+// known_hosts lines of the forge, added base64 encoded next to the netrc
+// credentials. The default clone plugin uses them to clone over SSH.
+func WithNetrcSSH(key, hostKey string) Option {
+	return func(compiler *Compiler) {
+		if key == "" {
+			return
+		}
+		compiler.cloneEnv["CI_NETRC_SSH_KEY"] = base64.StdEncoding.EncodeToString([]byte(key))
+		if hostKey != "" {
+			compiler.cloneEnv["CI_NETRC_SSH_HOST_KEY"] = base64.StdEncoding.EncodeToString([]byte(hostKey))
+		}
 	}
 }
 

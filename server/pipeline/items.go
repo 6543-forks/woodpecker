@@ -142,6 +142,13 @@ func parsePipeline(ctx context.Context, forge forge.Forge, store store.Store, cu
 				),
 				repo.IsSCMPrivate || server.Config.Pipeline.AuthenticatePublicRepos,
 			),
+			compiler.WithOption(
+				compiler.WithNetrcSSH(
+					netrc.SSHKey,
+					netrc.SSHHostKey,
+				),
+				repo.IsSCMPrivate || server.Config.Pipeline.AuthenticatePublicRepos,
+			),
 			compiler.WithDefaultClonePlugin(server.Config.Pipeline.DefaultClonePlugin),
 			compiler.WithWorkspaceFromURL(compiler.DefaultWorkspaceBase, repo.ForgeURL),
 		},

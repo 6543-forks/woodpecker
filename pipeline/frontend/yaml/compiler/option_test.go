@@ -109,6 +109,21 @@ func TestWithNetrc(t *testing.T) {
 	assert.Equal(t, "github.com", compiler.cloneEnv["CI_NETRC_MACHINE"])
 }
 
+func TestWithNetrcSSH(t *testing.T) {
+	compiler := New(
+		WithNetrcSSH(
+			"-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----\n",
+			"github.com ssh-ed25519 AAAA\n",
+		),
+	)
+	assert.Equal(t, "LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0Ka2V5Ci0tLS0tRU5EIE9QRU5TU0ggUFJJVkFURSBLRVktLS0tLQo=", compiler.cloneEnv["CI_NETRC_SSH_KEY"])
+	assert.Equal(t, "Z2l0aHViLmNvbSBzc2gtZWQyNTUxOSBBQUFBCg==", compiler.cloneEnv["CI_NETRC_SSH_HOST_KEY"])
+
+	compiler = New(WithNetrcSSH("", ""))
+	assert.NotContains(t, compiler.cloneEnv, "CI_NETRC_SSH_KEY")
+	assert.NotContains(t, compiler.cloneEnv, "CI_NETRC_SSH_HOST_KEY")
+}
+
 func TestWithProxy(t *testing.T) {
 	// alter the default values
 	noProxy := "example.com"

@@ -69,6 +69,7 @@ type Repo struct {
 	AllowDeploy                  bool                 `json:"allow_deploy"                    xorm:"allow_deploy"`
 	Config                       string               `json:"config_file"                     xorm:"varchar(500) 'config_path'"`
 	WebhookSecret                string               `json:"-"                               xorm:"varchar(500) 'hash'"`
+	CloneSecret                  *CloneSecret         `json:"-"                               xorm:"json 'clone_secret'"`
 	CancelPreviousPipelineEvents []WebhookEvent       `json:"cancel_previous_pipeline_events" xorm:"json 'cancel_previous_pipeline_events'"`
 	NetrcTrustedPlugins          []string             `json:"netrc_trusted"                   xorm:"json 'netrc_trusted'"`
 	ConfigExtensionEndpoint      string               `json:"config_extension_endpoint"       xorm:"varchar(500) 'config_extension_endpoint'"`
@@ -91,6 +92,17 @@ type Repo struct {
 
 	Perm *Perm `json:"-" xorm:"-"`
 } //	@name	Repo
+
+// CloneSecret holds repository scoped clone credentials the forge created for Woodpecker,
+// so pipelines do not need the OAuth token of the repository user to clone.
+type CloneSecret struct {
+	// SSHKey is the private key (OpenSSH PEM) of a read-only deploy key.
+	SSHKey string `json:"ssh_key,omitempty"`
+	// SSHHostKey holds the known_hosts lines of the forge SSH server.
+	SSHHostKey string `json:"ssh_host_key,omitempty"`
+	// KeyID is the forge ID of the deploy key.
+	KeyID string `json:"key_id,omitempty"`
+}
 
 // TableName return database table name for xorm.
 func (Repo) TableName() string {

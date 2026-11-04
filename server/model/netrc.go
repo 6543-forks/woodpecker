@@ -19,4 +19,8 @@ type Netrc struct {
 	Login    string    `json:"login"`
 	Password string    `json:"password"`
 	Type     ForgeType `json:"type"`
+	// SSHKey is a private SSH key for cloning, used instead of Login and Password if set.
+	SSHKey string `json:"ssh_key,omitempty"`
+	// SSHHostKey holds the known_hosts lines for SSHKey.
+	SSHHostKey string `json:"ssh_host_key,omitempty"`
 }
