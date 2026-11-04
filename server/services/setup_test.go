@@ -121,6 +121,17 @@ func TestSetupForgeService(t *testing.T) {
 			options: map[string]any{"merge-ref": true, "public-only": false},
 		},
 		{
+			name: "github app",
+			flags: []cli.Flag{
+				&cli.BoolFlag{Name: "github", Value: true},
+				&cli.StringFlag{Name: "github-app-id", Value: "42"},
+				&cli.StringFlag{Name: "github-app-private-key", Value: "pem"},
+			},
+			want:    model.ForgeTypeGithub,
+			url:     "https://github.com",
+			options: map[string]any{"merge-ref": false, "public-only": false, "app-id": "42", "app-private-key": "pem"},
+		},
+		{
 			name:    "gitlab defaults to gitlab.com",
 			flags:   []cli.Flag{&cli.BoolFlag{Name: "gitlab", Value: true}},
 			want:    model.ForgeTypeGitlab,

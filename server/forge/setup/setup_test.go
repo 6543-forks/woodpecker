@@ -15,6 +15,10 @@
 package setup
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -51,6 +55,34 @@ func TestForgeGitHub(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.NotNil(t, f)
+}
+
+func TestForgeGitHubApp(t *testing.T) {
+	t.Parallel()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pemKey := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+
+	for _, tc := range []struct {
+		name    string
+		options map[string]any
+		wantErr bool
+	}{
+		{name: "app", options: map[string]any{"app-id": "42", "app-private-key": pemKey}},
+		{name: "invalid app id", options: map[string]any{"app-id": "forty-two", "app-private-key": pemKey}, wantErr: true},
+		{name: "invalid private key", options: map[string]any{"app-id": "42", "app-private-key": "not a key"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, err := Forge(&model.Forge{ID: 1, Type: model.ForgeTypeGithub, URL: "https://github.com", AdditionalOptions: tc.options})
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotNil(t, f)
+		})
+	}
 }
 
 func TestForgeGiteaRequiresURL(t *testing.T) {

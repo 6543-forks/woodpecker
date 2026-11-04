@@ -17,6 +17,7 @@ package github
 
 import (
 	"context"
+	"crypto/rsa"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -60,6 +61,8 @@ type Opts struct {
 	MergeRef          bool   // Clone pull requests using the merge ref.
 	OnlyPublic        bool   // Only obtain OAuth tokens with access to public repos.
 	OAuthHost         string // Public url for oauth if different from url.
+	AppID             int64  // GitHub App id, used with AppPrivateKey to clone with installation tokens.
+	AppPrivateKey     string // GitHub App private key (PEM).
 }
 
 // New returns a Forge implementation that integrates with a GitHub Cloud or
@@ -80,6 +83,14 @@ func New(id int64, opts Opts) (forge.Forge, error) {
 		r.url = strings.TrimSuffix(opts.URL, "/")
 		r.API = r.url + "/api/v3/"
 	}
+	if opts.AppPrivateKey != "" {
+		key, err := parseAppKey(opts.AppID, opts.AppPrivateKey)
+		if err != nil {
+			return nil, err
+		}
+		r.appID = opts.AppID
+		r.appKey = key
+	}
 
 	return r, nil
 }
@@ -96,6 +107,8 @@ type client struct {
 	oAuthHost  string
 	// scanHostKey returns the known_hosts line for an SSH clone URL, nil uses common.ScanSSHHostKey.
 	scanHostKey func(ctx context.Context, cloneSSH string) (string, error)
+	appID       int64
+	appKey      *rsa.PrivateKey
 }
 
 // Name returns the string name of this driver.
@@ -392,8 +405,9 @@ func (c *client) PullRequests(ctx context.Context, u *model.User, r *model.Repo,
 }
 
 // Netrc returns a netrc file capable of authenticating GitHub requests and
-// cloning GitHub repositories. It prefers the read-only deploy key added on
-// activation and falls back to the token of the user.
+// cloning GitHub repositories. It prefers a read-only installation token of
+// the configured GitHub App, then the read-only deploy key added on
+// activation, and falls back to the token of the user.
 func (c *client) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
 	host, err := common.ExtractHostFromCloneURL(r.Clone)
 	if err != nil {
@@ -402,6 +416,18 @@ func (c *client) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
 	netrc := &model.Netrc{
 		Machine: host,
 		Type:    model.ForgeTypeGithub,
+	}
+
+	if c.appKey != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), appTokenTimeout)
+		defer cancel()
+		token, err := c.installationToken(ctx, r)
+		if err == nil {
+			netrc.Login = "x-access-token"
+			netrc.Password = token
+			return netrc, nil
+		}
+		log.Debug().Err(err).Msgf("could not get a GitHub App token for %s", r.FullName)
 	}
 
 	switch {
@@ -658,6 +684,11 @@ func (c *client) Activate(ctx context.Context, u *model.User, r *model.Repo, lin
 		return err
 	}
 
+	if c.appInstalled(ctx, r) {
+		// installation tokens replace the deploy key
+		r.CloneSecret = nil
+		return nil
+	}
 	if err := c.addDeployKey(ctx, client, r); err != nil {
 		log.Warn().Err(err).Msgf("could not add a deploy key to %s, pipelines clone with the user token", r.FullName)
 	}

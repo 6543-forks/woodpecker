@@ -34,7 +34,9 @@ Use this one for the `WOODPECKER_GITHUB_SECRET` environment variable.
 
 ## Clone credentials
 
-Activating a repository adds the read-only deploy key `woodpecker-deploy-key`, so pipelines clone over SSH with credentials limited to the repository instead of the token of the user who activated it.
+If a [GitHub App for cloning](#github_app_id) is configured and installed for the repository, every pipeline clones with an installation token that can only read the contents of this repository and expires after one hour.
+
+Otherwise activating a repository adds the read-only deploy key `woodpecker-deploy-key`, so pipelines clone over SSH with credentials limited to the repository instead of the token of the user who activated it.
 The SSH host keys come from the GitHub API, or are taken from the SSH server on activation if the API has none.
 Repairing the repository replaces the key, deactivating it removes the key.
 
@@ -123,3 +125,31 @@ Configure if SSL verification should be skipped.
 - Default: `false`
 
 Configures the GitHub OAuth client to only obtain a token that can manage public repositories.
+
+---
+
+### GITHUB_APP_ID
+
+- Name: `WOODPECKER_GITHUB_APP_ID`
+- Default: none
+
+ID of a GitHub App whose installation tokens are used to clone repositories, see [clone credentials](#clone-credentials).
+This is a second app next to the OAuth app used to log in: give it only the repository permission `Contents: Read-only`, no callback URL and no webhook, and install it for the repositories or organizations Woodpecker builds.
+
+---
+
+### GITHUB_APP_PRIVATE_KEY
+
+- Name: `WOODPECKER_GITHUB_APP_PRIVATE_KEY`
+- Default: none
+
+Private key (PEM) of the GitHub App set by `WOODPECKER_GITHUB_APP_ID`.
+
+---
+
+### GITHUB_APP_PRIVATE_KEY_FILE
+
+- Name: `WOODPECKER_GITHUB_APP_PRIVATE_KEY_FILE`
+- Default: none
+
+Read the value for `WOODPECKER_GITHUB_APP_PRIVATE_KEY` from the specified filepath.

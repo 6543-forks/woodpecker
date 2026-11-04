@@ -17,6 +17,7 @@ package setup
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/rs/zerolog/log"
@@ -144,6 +145,14 @@ func setupGitHub(forge *model.Forge) (forge.Forge, error) {
 	// get additional config and be false by default
 	mergeRef, _ := forge.AdditionalOptions["merge-ref"].(bool)
 	publicOnly, _ := forge.AdditionalOptions["public-only"].(bool)
+	var appID int64
+	if id, ok := forge.AdditionalOptions["app-id"].(string); ok && id != "" {
+		var err error
+		if appID, err = strconv.ParseInt(id, 10, 64); err != nil {
+			return nil, fmt.Errorf("invalid GitHub App id %q: %w", id, err)
+		}
+	}
+	appPrivateKey, _ := forge.AdditionalOptions["app-private-key"].(string)
 
 	opts := github.Opts{
 		URL:               forge.URL,
@@ -153,12 +162,15 @@ func setupGitHub(forge *model.Forge) (forge.Forge, error) {
 		MergeRef:          mergeRef,
 		OnlyPublic:        publicOnly,
 		OAuthHost:         forge.OAuthHost,
+		AppID:             appID,
+		AppPrivateKey:     appPrivateKey,
 	}
 	log.Debug().
 		Str("url", opts.URL).
 		Str("oauth-host", opts.OAuthHost).
 		Bool("merge-ref", opts.MergeRef).
 		Bool("only-public", opts.OnlyPublic).
+		Int64("app-id", opts.AppID).
 		Bool("skip-verify", opts.SkipVerify).
 		Bool("oauth-client-id-set", opts.OAuthClientID != "").
 		Bool("oauth-client-secret-set", opts.OAuthClientSecret != "").
