@@ -32,6 +32,15 @@ Do not use a "GitHub App" instead of an Oauth2 app as the former will not work c
 After your App has been created, you can generate a client secret.
 Use this one for the `WOODPECKER_GITHUB_SECRET` environment variable.
 
+## Clone credentials
+
+Activating a repository adds the read-only deploy key `woodpecker-deploy-key`, so pipelines clone over SSH with credentials limited to the repository instead of the token of the user who activated it.
+The SSH host keys come from the GitHub API, or are taken from the SSH server on activation if the API has none.
+Repairing the repository replaces the key, deactivating it removes the key.
+
+GitHub deletes a deploy key when the OAuth token that created it is revoked, and organizations can forbid deploy keys.
+If no key can be added, pipelines clone with the token of the user as before.
+
 ## Configuration
 
 This is a full list of configuration options. Please note that many of these options use default configuration values that should work for the majority of installations.

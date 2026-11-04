@@ -137,3 +137,18 @@ func TestCloneToken(t *testing.T) {
 		assert.Equal(t, tc.expired, CloneTokenExpired(tc.name, tc.now), tc.name)
 	}
 }
+
+func TestKnownHostsLines(t *testing.T) {
+	lines, err := KnownHostsLines("git@github.com:octocat/repo.git", []string{"ssh-ed25519 AAAA1", "ecdsa-sha2-nistp256 AAAA2"})
+	require.NoError(t, err)
+	assert.Equal(t, "github.com ssh-ed25519 AAAA1\ngithub.com ecdsa-sha2-nistp256 AAAA2\n", lines)
+
+	lines, err = KnownHostsLines("ssh://git@ghe.example:2222/octocat/repo.git", []string{"ssh-ed25519 AAAA1"})
+	require.NoError(t, err)
+	assert.Equal(t, "[ghe.example]:2222 ssh-ed25519 AAAA1\n", lines)
+
+	_, err = KnownHostsLines("https://github.com/octocat/repo.git", []string{"ssh-ed25519 AAAA1"})
+	assert.Error(t, err)
+	_, err = KnownHostsLines("git@github.com:octocat/repo.git", nil)
+	assert.Error(t, err)
+}

@@ -94,6 +94,8 @@ type client struct {
 	MergeRef   bool
 	OnlyPublic bool
 	oAuthHost  string
+	// scanHostKey returns the known_hosts line for an SSH clone URL, nil uses common.ScanSSHHostKey.
+	scanHostKey func(ctx context.Context, cloneSSH string) (string, error)
 }
 
 // Name returns the string name of this driver.
@@ -390,28 +392,28 @@ func (c *client) PullRequests(ctx context.Context, u *model.User, r *model.Repo,
 }
 
 // Netrc returns a netrc file capable of authenticating GitHub requests and
-// cloning GitHub repositories. The netrc will use the global machine account
-// when configured.
+// cloning GitHub repositories. It prefers the read-only deploy key added on
+// activation and falls back to the token of the user.
 func (c *client) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
-	login := ""
-	token := ""
-
-	if u != nil {
-		login = u.AccessToken
-		token = "x-oauth-basic"
-	}
-
 	host, err := common.ExtractHostFromCloneURL(r.Clone)
 	if err != nil {
 		return nil, err
 	}
+	netrc := &model.Netrc{
+		Machine: host,
+		Type:    model.ForgeTypeGithub,
+	}
 
-	return &model.Netrc{
-		Login:    login,
-		Password: token,
-		Machine:  host,
-		Type:     model.ForgeTypeGithub,
-	}, nil
+	switch {
+	case u == nil:
+	case r.CloneSecret != nil && r.CloneSecret.SSHKey != "":
+		netrc.SSHKey = r.CloneSecret.SSHKey
+		netrc.SSHHostKey = r.CloneSecret.SSHHostKey
+	default:
+		netrc.Login = u.AccessToken
+		netrc.Password = "x-oauth-basic"
+	}
+	return netrc, nil
 }
 
 // Deactivate deactivates the repository be removing registered push hooks from
@@ -432,12 +434,14 @@ func (c *client) Deactivate(ctx context.Context, u *model.User, r *model.Repo, l
 	if err != nil {
 		return err
 	}
-	match := matchingHooks(hooks, link)
-	if match == nil {
-		return nil
+	if match := matchingHooks(hooks, link); match != nil {
+		if _, err := client.Repositories.DeleteHook(ctx, forgeRepo.Owner, forgeRepo.Name, *match.ID); err != nil {
+			return err
+		}
 	}
-	_, err = client.Repositories.DeleteHook(ctx, forgeRepo.Owner, forgeRepo.Name, *match.ID)
-	return err
+
+	deleteDeployKeys(ctx, client, forgeRepo.Owner, forgeRepo.Name)
+	return nil
 }
 
 // OrgMembership returns if user is member of organization and if user
@@ -650,8 +654,14 @@ func (c *client) Activate(ctx context.Context, u *model.User, r *model.Repo, lin
 			ContentType: new("form"),
 		},
 	}
-	_, _, err = client.Repositories.CreateHook(ctx, r.Owner, r.Name, hook)
-	return err
+	if _, _, err := client.Repositories.CreateHook(ctx, r.Owner, r.Name, hook); err != nil {
+		return err
+	}
+
+	if err := c.addDeployKey(ctx, client, r); err != nil {
+		log.Warn().Err(err).Msgf("could not add a deploy key to %s, pipelines clone with the user token", r.FullName)
+	}
+	return nil
 }
 
 // Branches returns the names of all branches for the named repository.

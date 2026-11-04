@@ -102,6 +102,24 @@ func ScanSSHHostKey(ctx context.Context, cloneSSH string) (string, error) {
 	return knownhosts.Line([]string{knownhosts.Normalize(address)}, hostKey) + "\n", nil
 }
 
+// KnownHostsLines returns known_hosts lines for the host of an SSH clone URL
+// and host keys in authorized_keys format, like the ones a forge API publishes.
+func KnownHostsLines(cloneSSH string, keys []string) (string, error) {
+	if len(keys) == 0 {
+		return "", errors.New("no host keys")
+	}
+	address, err := sshAddress(cloneSSH)
+	if err != nil {
+		return "", err
+	}
+	host := knownhosts.Normalize(address)
+	var lines strings.Builder
+	for _, key := range keys {
+		lines.WriteString(host + " " + strings.TrimSpace(key) + "\n")
+	}
+	return lines.String(), nil
+}
+
 // sshAddress returns host:port of an SSH clone URL, in URL (ssh://) or scp-like form.
 func sshAddress(cloneSSH string) (string, error) {
 	if strings.HasPrefix(cloneSSH, "ssh://") {
