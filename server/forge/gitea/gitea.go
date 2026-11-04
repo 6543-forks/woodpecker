@@ -55,6 +55,8 @@ type Gitea struct {
 	oAuthHost         string
 	skipVerify        bool
 	pageSize          int
+	// scanHostKey returns the known_hosts line for an SSH clone URL.
+	scanHostKey func(ctx context.Context, cloneSSH string) (string, error)
 }
 
 // Opts defines configuration options.
@@ -76,6 +78,7 @@ func New(id int64, opts Opts) (forge.Forge, error) {
 		oAuthClientSecret: opts.OAuthClientSecret,
 		oAuthHost:         opts.OAuthHost,
 		skipVerify:        opts.SkipVerify,
+		scanHostKey:       common.ScanSSHHostKey,
 	}, nil
 }
 
@@ -335,28 +338,41 @@ func (c *Gitea) Status(ctx context.Context, user *model.User, repo *model.Repo, 
 }
 
 // Netrc returns a netrc file capable of authenticating Gitea requests and
-// cloning Gitea repositories. The netrc will use the global machine account
-// when configured.
+// cloning Gitea repositories. It prefers credentials limited to the repository:
+// a fresh read-only deploy token on Gitea 1.28 and newer, else the deploy key
+// added on activation, and falls back to the token of the user.
 func (c *Gitea) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
-	login := ""
-	token := ""
-
-	if u != nil {
-		login = u.Login
-		token = u.AccessToken
-	}
-
 	host, err := common.ExtractHostFromCloneURL(r.Clone)
 	if err != nil {
 		return nil, err
 	}
+	netrc := &model.Netrc{
+		Machine: host,
+		Type:    model.ForgeTypeGitea,
+	}
+	if u == nil {
+		return netrc, nil
+	}
 
-	return &model.Netrc{
-		Login:    login,
-		Password: token,
-		Machine:  host,
-		Type:     model.ForgeTypeGitea,
-	}, nil
+	ctx, cancel := context.WithTimeout(context.Background(), cloneSecretTimeout)
+	defer cancel()
+	token, err := c.cloneToken(ctx, u, r)
+	switch {
+	case err != nil:
+		log.Warn().Err(err).Msgf("could not create a deploy token for %s, use the user token to clone", r.FullName)
+	case token != "":
+		netrc.Login = deployTokenLogin
+		netrc.Password = token
+		return netrc, nil
+	case r.CloneSecret != nil && r.CloneSecret.SSHKey != "":
+		netrc.SSHKey = r.CloneSecret.SSHKey
+		netrc.SSHHostKey = r.CloneSecret.SSHHostKey
+		return netrc, nil
+	}
+
+	netrc.Login = u.Login
+	netrc.Password = u.AccessToken
+	return netrc, nil
 }
 
 // Activate activates the repository by registering post-commit hooks with
@@ -390,6 +406,10 @@ func (c *Gitea) Activate(ctx context.Context, u *model.User, r *model.Repo, link
 		}
 		return err
 	}
+
+	if err := c.updateCloneSecret(ctx, client, r); err != nil {
+		log.Warn().Err(err).Msgf("could not add a deploy key to %s, pipelines clone with the user token", r.FullName)
+	}
 	return nil
 }
 
@@ -420,10 +440,14 @@ func (c *Gitea) Deactivate(ctx context.Context, u *model.User, r *model.Repo, li
 
 	hook := matchingHooks(hooks, link)
 	if hook != nil {
-		_, err := client.DeleteRepoHook(forgeRepo.Owner, forgeRepo.Name, hook.ID)
-		return err
+		if _, err := client.DeleteRepoHook(forgeRepo.Owner, forgeRepo.Name, hook.ID); err != nil {
+			return err
+		}
 	}
 
+	c.deleteDeployKeys(ctx, client, forgeRepo.Owner, forgeRepo.Name, func(title string) bool {
+		return title == common.DeployKeyTitle || strings.HasPrefix(title, common.CloneTokenPrefix)
+	})
 	return nil
 }
 
@@ -587,15 +611,20 @@ func (c *Gitea) Org(ctx context.Context, u *model.User, owner string) (*model.Or
 	}, nil
 }
 
-// newClientToken returns the Gitea client with Token.
-func (c *Gitea) newClientToken(ctx context.Context, token string) (*gitea.Client, error) {
+// httpClient returns the HTTP client for requests to Gitea.
+func (c *Gitea) httpClient() *http.Client {
 	httpClient := &http.Client{}
 	if c.skipVerify {
 		httpClient.Transport = &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
 	}
-	wrappedClient := httputil.WrapClient(httpClient, "forge-gitea")
+	return httputil.WrapClient(httpClient, "forge-gitea")
+}
+
+// newClientToken returns the Gitea client with Token.
+func (c *Gitea) newClientToken(ctx context.Context, token string) (*gitea.Client, error) {
+	wrappedClient := c.httpClient()
 	client, err := gitea.NewClient(c.url, gitea.SetToken(token), gitea.SetHTTPClient(wrappedClient), gitea.SetContext(ctx))
 	if err != nil &&
 		(errors.Is(err, &gitea.ErrUnknownVersion{}) || strings.Contains(err.Error(), "Malformed version")) {

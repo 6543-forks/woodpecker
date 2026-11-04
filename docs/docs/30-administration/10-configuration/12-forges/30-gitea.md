@@ -71,6 +71,18 @@ For reference see [Configuration Cheat Sheet](https://docs.gitea.com/administrat
 Make sure your Gitea configuration allows requesting the API with a fixed page length of 50. The default value for the maximum page size is 50, but if you set a value lower than 50, some Woodpecker features will not work properly. Also see the [Configuration Cheat Sheet](https://docs.gitea.com/administration/config-cheat-sheet#api-api).
 :::
 
+## Clone credentials
+
+Pipelines clone with credentials limited to the repository instead of the token of the user who activated it:
+
+- Gitea 1.28 and newer: every pipeline gets a new read-only deploy token named `woodpecker-clone-<expiry>-<id>`.
+  Gitea tokens do not expire, so Woodpecker deletes its tokens after the repository timeout plus one day.
+- Older Gitea: activating the repository adds the read-only deploy key `woodpecker-deploy-key`, and the clone step uses SSH.
+  Woodpecker trusts the SSH host key it sees on activation. Repairing the repository replaces the key.
+
+If neither is available, for example because SSH is disabled, pipelines clone with the token of the user as before.
+Deactivating the repository removes the key and the tokens.
+
 ## Configuration
 
 This is a full list of configuration options. Please note that many of these options use default configuration values that should work for the majority of installations.
