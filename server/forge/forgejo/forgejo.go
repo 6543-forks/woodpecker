@@ -53,6 +53,8 @@ type Forgejo struct {
 	oAuthClientSecret string
 	skipVerify        bool
 	pageSize          int
+	// scanHostKey returns the known_hosts line for an SSH clone URL.
+	scanHostKey func(ctx context.Context, cloneSSH string) (string, error)
 }
 
 // Opts defines configuration options.
@@ -78,6 +80,7 @@ func New(id int64, opts Opts) (forge.Forge, error) {
 		oAuthClientID:     opts.OAuthClientID,
 		oAuthClientSecret: opts.OAuthClientSecret,
 		skipVerify:        opts.SkipVerify,
+		scanHostKey:       common.ScanSSHHostKey,
 	}, nil
 }
 
@@ -333,28 +336,28 @@ func (c *Forgejo) Status(ctx context.Context, user *model.User, repo *model.Repo
 }
 
 // Netrc returns a netrc file capable of authenticating Forgejo requests and
-// cloning Forgejo repositories. The netrc will use the global machine account
-// when configured.
+// cloning Forgejo repositories. It prefers the read-only deploy key added on
+// activation and falls back to the token of the user.
 func (c *Forgejo) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
-	login := ""
-	token := ""
-
-	if u != nil {
-		login = u.Login
-		token = u.AccessToken
-	}
-
 	host, err := common.ExtractHostFromCloneURL(r.Clone)
 	if err != nil {
 		return nil, err
 	}
+	netrc := &model.Netrc{
+		Machine: host,
+		Type:    model.ForgeTypeForgejo,
+	}
 
-	return &model.Netrc{
-		Login:    login,
-		Password: token,
-		Machine:  host,
-		Type:     model.ForgeTypeForgejo,
-	}, nil
+	switch {
+	case u == nil:
+	case r.CloneSecret != nil && r.CloneSecret.SSHKey != "":
+		netrc.SSHKey = r.CloneSecret.SSHKey
+		netrc.SSHHostKey = r.CloneSecret.SSHHostKey
+	default:
+		netrc.Login = u.Login
+		netrc.Password = u.AccessToken
+	}
+	return netrc, nil
 }
 
 // Activate activates the repository by registering post-commit hooks with
@@ -388,6 +391,10 @@ func (c *Forgejo) Activate(ctx context.Context, u *model.User, r *model.Repo, li
 		}
 		return err
 	}
+
+	if err := c.updateCloneSecret(ctx, client, r); err != nil {
+		log.Warn().Err(err).Msgf("could not add a deploy key to %s, pipelines clone with the user token", r.FullName)
+	}
 	return nil
 }
 
@@ -418,10 +425,12 @@ func (c *Forgejo) Deactivate(ctx context.Context, u *model.User, r *model.Repo, 
 
 	hook := matchingHooks(hooks, link)
 	if hook != nil {
-		_, err := client.DeleteRepoHook(forgeRepo.Owner, forgeRepo.Name, hook.ID)
-		return err
+		if _, err := client.DeleteRepoHook(forgeRepo.Owner, forgeRepo.Name, hook.ID); err != nil {
+			return err
+		}
 	}
 
+	c.deleteDeployKeys(ctx, client, forgeRepo.Owner, forgeRepo.Name)
 	return nil
 }
 

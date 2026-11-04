@@ -71,6 +71,13 @@ For reference see [Configuration Cheat Sheet](https://forgejo.org/docs/latest/ad
 Make sure your Forgejo configuration allows requesting the API with a fixed page length of 50. The default value for the maximum page size is 50, but if you set a value lower than 50, some Woodpecker features will not work properly. Also see the [Configuration Cheat Sheet](https://forgejo.org/docs/latest/admin/config-cheat-sheet/#api-api).
 :::
 
+## Clone credentials
+
+Activating a repository adds the read-only deploy key `woodpecker-deploy-key`, so pipelines clone over SSH with credentials limited to the repository instead of the token of the user who activated it.
+Woodpecker trusts the SSH host key it sees on activation. Repairing the repository replaces the key, deactivating it removes the key.
+
+If no key can be added, for example because SSH is disabled, pipelines clone with the token of the user as before.
+
 ## Configuration
 
 This is a full list of configuration options. Please note that many of these options use default configuration values that should work for the majority of installations.
