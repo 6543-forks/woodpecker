@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	gitlab "gitlab.com/gitlab-org/api/client-go/v3"
@@ -41,8 +42,9 @@ import (
 )
 
 const (
-	defaultScope   = "api"
-	defaultPerPage = 100
+	defaultScope      = "api"
+	defaultPerPage    = 100
+	cloneTokenTimeout = 30 * time.Second
 )
 
 // Opts defines configuration options.
@@ -490,28 +492,96 @@ func isRejectedStatusTransition(err error) bool {
 }
 
 // Netrc returns a netrc file capable of authenticating Gitlab requests and
-// cloning Gitlab repositories. The netrc will use the global machine account
-// when configured.
+// cloning Gitlab repositories. It uses a new read-only deploy token of the
+// project and falls back to the token of the user.
 func (g *GitLab) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
-	login := ""
-	token := ""
-
-	if u != nil {
-		login = "oauth2"
-		token = u.AccessToken
-	}
-
 	host, err := common.ExtractHostFromCloneURL(r.Clone)
 	if err != nil {
 		return nil, err
 	}
+	netrc := &model.Netrc{
+		Machine: host,
+		Type:    model.ForgeTypeGitlab,
+	}
+	if u == nil {
+		return netrc, nil
+	}
 
-	return &model.Netrc{
-		Login:    login,
-		Password: token,
-		Machine:  host,
-		Type:     model.ForgeTypeGitlab,
-	}, nil
+	ctx, cancel := context.WithTimeout(context.Background(), cloneTokenTimeout)
+	defer cancel()
+	token, err := g.cloneToken(ctx, u, r)
+	if err == nil {
+		netrc.Login = token.Username
+		netrc.Password = token.Token
+		return netrc, nil
+	}
+	log.Warn().Err(err).Msgf("could not create a deploy token for %s, use the user token to clone", r.FullName)
+
+	netrc.Login = "oauth2"
+	netrc.Password = u.AccessToken
+	return netrc, nil
+}
+
+// cloneToken creates a read-only deploy token of the project that expires after the
+// repository timeout plus queue slack. Expired clone tokens are removed first.
+func (g *GitLab) cloneToken(ctx context.Context, u *model.User, r *model.Repo) (*gitlab.DeployToken, error) {
+	client, err := newClient(g.url, u.AccessToken, g.skipVerify)
+	if err != nil {
+		return nil, err
+	}
+	pid := projectID(r)
+
+	now := time.Now()
+	g.deleteCloneTokens(ctx, client, pid, func(token *gitlab.DeployToken) bool {
+		return token.Expired || token.Revoked || (token.ExpiresAt != nil && token.ExpiresAt.Before(now))
+	})
+
+	expiry := common.CloneTokenExpiry(r, now)
+	token, _, err := client.DeployTokens.CreateProjectDeployToken(pid, &gitlab.CreateProjectDeployTokenOptions{
+		Name:      new(common.NewCloneTokenName(expiry)),
+		ExpiresAt: &expiry,
+		Scopes:    &[]string{"read_repository"},
+	}, gitlab.WithContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	if token.Token == "" || token.Username == "" {
+		return nil, errors.New("deploy token without credentials")
+	}
+	return token, nil
+}
+
+// deleteCloneTokens removes the clone tokens of the project that match.
+// Failures are only logged, a leftover token is removed on the next run.
+func (g *GitLab) deleteCloneTokens(ctx context.Context, client *gitlab.Client, pid any, match func(*gitlab.DeployToken) bool) {
+	opts := &gitlab.ListProjectDeployTokensOptions{PerPage: defaultPerPage, Page: 1}
+	for {
+		tokens, resp, err := client.DeployTokens.ListProjectDeployTokens(pid, opts, gitlab.WithContext(ctx))
+		if err != nil {
+			log.Warn().Err(err).Msgf("could not list deploy tokens of project %v", pid)
+			return
+		}
+		for _, token := range tokens {
+			if !strings.HasPrefix(token.Name, common.CloneTokenPrefix) || !match(token) {
+				continue
+			}
+			if _, err := client.DeployTokens.DeleteProjectDeployToken(pid, token.ID, gitlab.WithContext(ctx)); err != nil {
+				log.Warn().Err(err).Msgf("could not delete deploy token %q of project %v", token.Name, pid)
+			}
+		}
+		if resp.NextPage == 0 || resp.NextPage <= opts.Page {
+			return
+		}
+		opts.Page = resp.NextPage
+	}
+}
+
+// projectID returns the GitLab project ID of the repository, or its path if the ID is unknown.
+func projectID(r *model.Repo) any {
+	if id, err := strconv.ParseInt(string(r.ForgeRemoteID), 10, 64); err == nil {
+		return id
+	}
+	return r.Owner + "/" + r.Name
 }
 
 func (g *GitLab) getTokenAndWebURL(link string) (token, webURL string, err error) {
@@ -605,6 +675,7 @@ func (g *GitLab) Deactivate(ctx context.Context, user *model.User, repo *model.R
 		listProjectHooksOptions.Page = resp.NextPage
 	}
 
+	g.deleteCloneTokens(ctx, client, _repo.ID, func(*gitlab.DeployToken) bool { return true })
 	return nil
 }
 

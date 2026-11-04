@@ -29,6 +29,14 @@ If you restrict logins using [`WOODPECKER_ORGS`](../10-server.md#orgs) or the [a
 Woodpecker only considers GitLab groups in which the user has at least the `Developer` role. A user holding a lower role, such as `Guest` or `Reporter`, is not seen as a member of that group and is denied access even if the group is on the list.
 :::
 
+## Clone credentials
+
+Every pipeline clones with a new deploy token of the project with the `read_repository` scope, instead of the token of the user who activated the repository.
+The token is named `woodpecker-clone-<expiry>-<id>` and expires after the repository timeout plus one day.
+Woodpecker deletes its expired tokens when it creates the next one, and all of them when the repository is deactivated.
+
+Creating deploy tokens needs the Maintainer role in the project. If it fails, pipelines clone with the token of the user as before.
+
 ## Configuration
 
 This is a full list of configuration options. Please note that many of these options use default configuration values that should work for the majority of installations.

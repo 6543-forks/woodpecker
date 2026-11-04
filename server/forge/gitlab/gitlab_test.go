@@ -1077,18 +1077,114 @@ func TestOrg(t *testing.T) {
 	assert.ErrorContains(t, err, "could not find org missing")
 }
 
+// fakeDeployTokens serves the deploy token API of project 4.
+type fakeDeployTokens struct {
+	tokens     []map[string]any
+	nextID     int64
+	failCreate bool
+	created    map[string]any
+	deleted    []string
+}
+
+func (f *fakeDeployTokens) server(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	f.register(t, mux)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func (f *fakeDeployTokens) register(t *testing.T, mux *http.ServeMux) {
+	t.Helper()
+	mux.HandleFunc("GET /api/v4/projects/4/deploy_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		assert.NoError(t, json.NewEncoder(w).Encode(f.tokens))
+	})
+	mux.HandleFunc("POST /api/v4/projects/4/deploy_tokens", func(w http.ResponseWriter, r *http.Request) {
+		if f.failCreate {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		f.created = make(map[string]any)
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&f.created))
+		f.nextID++
+		w.WriteHeader(http.StatusCreated)
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"id": f.nextID, "name": f.created["name"], "username": "gitlab+deploy-token-" + strconv.FormatInt(f.nextID, 10),
+			"token": "deploy-token", "scopes": f.created["scopes"], "expires_at": f.created["expires_at"],
+		}))
+	})
+	mux.HandleFunc("DELETE /api/v4/projects/4/deploy_tokens/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.deleted = append(f.deleted, r.PathValue("id"))
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
 func TestNetrc(t *testing.T) {
-	client := load("https://gitlab.example.com?client_id=test&client_secret=test")
-	repo := &model.Repo{Clone: "https://gitlab.example.com/group/repo.git"}
+	user := &model.User{AccessToken: "token"}
+	repo := &model.Repo{ForgeRemoteID: "4", Timeout: 60, Clone: "https://gitlab.example.com/group/repo.git"}
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 
-	netrc, err := client.Netrc(&model.User{AccessToken: "token"}, repo)
-	require.NoError(t, err)
-	assert.Equal(t, &model.Netrc{Machine: "gitlab.example.com", Login: "oauth2", Password: "token", Type: model.ForgeTypeGitlab}, netrc)
+	t.Run("creates a read-only deploy token and removes expired ones", func(t *testing.T) {
+		fake := &fakeDeployTokens{tokens: []map[string]any{
+			{"id": 10, "name": "woodpecker-clone-1", "expires_at": past, "expired": true},
+			{"id": 11, "name": "woodpecker-clone-2", "revoked": true},
+			{"id": 12, "name": "woodpecker-clone-3", "expires_at": future},
+			{"id": 13, "name": "own-token", "expires_at": past, "expired": true},
+		}, nextID: 20}
+		client := load(fake.server(t).URL + "?client_id=test&client_secret=test")
 
-	// without a user only the machine is known
-	netrc, err = client.Netrc(nil, repo)
-	require.NoError(t, err)
-	assert.Equal(t, &model.Netrc{Machine: "gitlab.example.com", Type: model.ForgeTypeGitlab}, netrc)
+		before := time.Now()
+		netrc, err := client.Netrc(user, repo)
+		require.NoError(t, err)
+		assert.Equal(t, &model.Netrc{Machine: "gitlab.example.com", Login: "gitlab+deploy-token-21", Password: "deploy-token", Type: model.ForgeTypeGitlab}, netrc)
+
+		assert.Equal(t, []any{"read_repository"}, fake.created["scopes"])
+		assert.True(t, strings.HasPrefix(fake.created["name"].(string), "woodpecker-clone-"), fake.created["name"]) //nolint:forcetypeassert // test
+		expires, err := time.Parse(time.RFC3339, fake.created["expires_at"].(string))                               //nolint:forcetypeassert // test
+		require.NoError(t, err)
+		assert.WithinDuration(t, before.Add(time.Hour+24*time.Hour), expires, time.Minute, "the token must outlive the repo timeout plus queue slack")
+		assert.Equal(t, []string{"10", "11"}, fake.deleted, "only expired or revoked woodpecker tokens are removed")
+	})
+
+	t.Run("failing deploy token falls back to the user token", func(t *testing.T) {
+		fake := &fakeDeployTokens{failCreate: true}
+		client := load(fake.server(t).URL + "?client_id=test&client_secret=test")
+
+		netrc, err := client.Netrc(user, repo)
+		require.NoError(t, err)
+		assert.Equal(t, &model.Netrc{Machine: "gitlab.example.com", Login: "oauth2", Password: "token", Type: model.ForgeTypeGitlab}, netrc)
+	})
+
+	t.Run("without a user only the machine is known", func(t *testing.T) {
+		client := load("https://gitlab.example.com?client_id=test&client_secret=test")
+
+		netrc, err := client.Netrc(nil, repo)
+		require.NoError(t, err)
+		assert.Equal(t, &model.Netrc{Machine: "gitlab.example.com", Type: model.ForgeTypeGitlab}, netrc)
+	})
+}
+
+func TestDeactivateRemovesDeployTokens(t *testing.T) {
+	fake := &fakeDeployTokens{tokens: []map[string]any{
+		{"id": 10, "name": "woodpecker-clone-1"},
+		{"id": 11, "name": "own-token"},
+	}}
+	mux := http.NewServeMux()
+	fake.register(t, mux)
+	mux.HandleFunc("GET /api/v4/projects/4", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":4}`))
+	})
+	mux.HandleFunc("GET /api/v4/projects/4/hooks", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	})
+	api := httptest.NewServer(mux)
+	defer api.Close()
+	client := load(api.URL + "?client_id=test&client_secret=test")
+
+	require.NoError(t, client.Deactivate(t.Context(), &model.User{AccessToken: "token"}, &model.Repo{ForgeRemoteID: "4"}, "https://ci.example/api/hook"))
+	assert.Equal(t, []string{"10"}, fake.deleted)
 }
 
 func TestFileAndDir(t *testing.T) {
