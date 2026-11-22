@@ -66,21 +66,31 @@ func (s storage) workflowsCreate(sess *xorm.Session, workflows []*model.Workflow
 
 // WorkflowsReplace performs an atomic replacement of workflows and associated steps by deleting all existing workflows and steps and inserting the new ones.
 func (s storage) WorkflowsReplace(pipeline *model.Pipeline, workflows []*model.Workflow) error {
-	sess := s.engine.NewSession()
-	defer sess.Close()
-	if err := sess.Begin(); err != nil {
-		return err
-	}
+	return retryWrite(func() error {
+		sess := s.engine.NewSession()
+		defer sess.Close()
+		if err := sess.Begin(); err != nil {
+			return wrapUpdate(0, err)
+		}
 
-	if err := s.workflowsDelete(sess, pipeline.ID); err != nil {
-		return err
-	}
+		// IDs set by a rolled back try may be taken by another insert meanwhile.
+		for _, workflow := range workflows {
+			workflow.ID = 0
+			for _, step := range workflow.Children {
+				step.ID = 0
+			}
+		}
 
-	if err := s.workflowsCreate(sess, workflows); err != nil {
-		return err
-	}
+		if err := s.workflowsDelete(sess, pipeline.ID); err != nil {
+			return err
+		}
 
-	return sess.Commit()
+		if err := s.workflowsCreate(sess, workflows); err != nil {
+			return err
+		}
+
+		return wrapUpdate(0, sess.Commit())
+	})
 }
 
 func (s storage) workflowsDelete(sess *xorm.Session, pipelineID int64) error {

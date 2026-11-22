@@ -16,9 +16,13 @@
 package datastore
 
 import (
+	"database/sql"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"xorm.io/xorm"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
@@ -122,4 +126,45 @@ func TestWorkflowUpdate(t *testing.T) {
 	workflowGet, err = store.WorkflowLoad(1)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StatusValue("success"), workflowGet.State)
+}
+
+func TestWorkflowsReplaceRetriesSQLiteLocks(t *testing.T) {
+	// Rollback journaling lets a reader block COMMIT after the writes succeed.
+	dsn := "file:" + filepath.Join(t.TempDir(), "workflows.db") + "?_busy_timeout=0&_journal_mode=DELETE"
+	engine, err := xorm.NewEngine("sqlite3", dsn)
+	require.NoError(t, err)
+	defer engine.Close()
+	require.NoError(t, engine.Sync(new(model.Workflow), new(model.Step), new(model.LogEntry), new(model.AgentSnapshot)))
+
+	s := storage{engine: engine}
+	pipeline := &model.Pipeline{ID: 1}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{{PipelineID: 1, PID: 1, Name: "old"}}))
+
+	other, err := sql.Open("sqlite3", dsn)
+	require.NoError(t, err)
+	defer other.Close()
+	holder, err := other.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer holder.Rollback() //nolint:errcheck
+	// Keep a shared read lock while WorkflowsReplace writes and commits.
+	var count int
+	require.NoError(t, holder.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM workflows").Scan(&count))
+
+	hook := &pipelineLockHook{releaseOn: "COMMIT", release: holder.Rollback}
+	engine.AddHook(hook)
+	err = s.WorkflowsReplace(pipeline, []*model.Workflow{{
+		PipelineID: 1, PID: 1, Name: "new",
+		Children: []*model.Step{{PipelineID: 1, PID: 2, PPID: 1, Name: "step"}},
+	}})
+
+	require.True(t, hook.released, "the first failed attempt must release the competing lock")
+	require.ErrorContains(t, hook.commitErr, "database is locked", "the lock must occur at COMMIT")
+	require.NoError(t, err, "replacing workflows must retry after a transient lock")
+	require.Greater(t, hook.attempts, 1, "retry must start a fresh transaction")
+
+	workflows, err := s.WorkflowGetTree(pipeline)
+	require.NoError(t, err)
+	require.Len(t, workflows, 1)
+	assert.Equal(t, "new", workflows[0].Name)
+	assert.Len(t, workflows[0].Children, 1)
 }
